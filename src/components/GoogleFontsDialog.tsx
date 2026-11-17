@@ -1,0 +1,352 @@
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { errorKindLabel, isAbortError, toFontLoadError, type FontLoadError } from '../font/errors'
+import {
+  ALL_SUBSETS,
+  curatedFamilies,
+  defaultSubset,
+  defaultWeight,
+  fetchGoogleFamily,
+  namedSubsets,
+  type GoogleFamilyInfo,
+  type GoogleFontRequest,
+} from '../font/google'
+import { enterChoice, looksLikeUrl, parseFontInput, type ParsedFontRequest } from '../font/googleUrl'
+import Icon from './Icon'
+
+interface GoogleFontsDialogProps {
+  open: boolean
+  onClose: () => void
+  onLoad: (request: GoogleFontRequest) => void
+}
+
+type FamilyState =
+  | { kind: 'idle' }
+  | { kind: 'loading' }
+  | { kind: 'ready'; info: GoogleFamilyInfo }
+  | { kind: 'error'; error: FontLoadError }
+
+const WEIGHT_LABELS: Record<number, string> = {
+  100: 'Thin',
+  200: 'ExtraLight',
+  300: 'Light',
+  400: 'Regular',
+  500: 'Medium',
+  600: 'SemiBold',
+  700: 'Bold',
+  800: 'ExtraBold',
+  900: 'Black',
+}
+
+export default function GoogleFontsDialog({ open, onClose, onLoad }: GoogleFontsDialogProps) {
+  const dialogRef = useRef<HTMLDialogElement>(null)
+  const searchRef = useRef<HTMLInputElement>(null)
+  const [query, setQuery] = useState('')
+  const [family, setFamily] = useState<string | null>(null)
+  const [attempt, setAttempt] = useState(0)
+  const [familyState, setFamilyState] = useState<FamilyState>({ kind: 'idle' })
+  const [italic, setItalic] = useState(false)
+  const [weight, setWeight] = useState(400)
+  const [subset, setSubset] = useState(ALL_SUBSETS)
+  /** What a pasted URL or typed name asked for; null when a curated family was clicked. */
+  const [requested, setRequested] = useState<ParsedFontRequest | null>(null)
+  /** Explains when the requested style could not be loaded as asked. */
+  const [styleNote, setStyleNote] = useState<string | null>(null)
+
+  useEffect(() => {
+    const dialog = dialogRef.current
+    if (!dialog) return
+    if (open && !dialog.open) {
+      dialog.showModal()
+      // showModal() focuses the first focusable element (the close button); start in the search field.
+      searchRef.current?.focus()
+    }
+    if (!open && dialog.open) dialog.close()
+  }, [open])
+
+  // Look up the family's styles whenever the selection changes; abort the previous lookup.
+  useEffect(() => {
+    if (!family) {
+      setFamilyState({ kind: 'idle' })
+      return
+    }
+    const controller = new AbortController()
+    setFamilyState({ kind: 'loading' })
+    fetchGoogleFamily(family, controller.signal).then(
+      (info) => {
+        const hasNormal = info.weights.normal.length > 0
+        const wantItalic = requested?.italic ?? false
+        const useItalic = (wantItalic && info.weights.italic.length > 0) || !hasNormal
+        const weights = useItalic ? info.weights.italic : info.weights.normal
+        const fallbackWeight = defaultWeight(weights)
+        const useWeight = requested?.weight && weights.includes(requested.weight) ? requested.weight : fallbackWeight
+        let note: string | null = null
+        if (requested && (requested.weight !== null || requested.italic !== null)) {
+          const asked = `${requested.weight ?? ''}${requested.italic ? ' italic' : ''}`.trim() || 'regular'
+          const matched =
+            (requested.weight === null || requested.weight === useWeight) &&
+            (requested.italic === null || requested.italic === useItalic)
+          if (!matched)
+            note = `The URL asks for ${asked}, which this family does not have; ${useWeight}${useItalic ? ' italic' : ''} will be loaded.`
+        }
+        setItalic(useItalic)
+        setWeight(useWeight)
+        setStyleNote(note)
+        setSubset(defaultSubset(info))
+        setFamilyState({ kind: 'ready', info })
+      },
+      (error) => {
+        if (controller.signal.aborted || isAbortError(error)) return
+        setFamilyState({ kind: 'error', error: toFontLoadError(error, 'network') })
+      },
+    )
+    return () => controller.abort()
+  }, [family, attempt, requested])
+
+  const matches = useMemo(() => {
+    const q = query.trim().toLowerCase()
+    return q ? curatedFamilies.filter((f) => f.family.toLowerCase().includes(q)) : curatedFamilies
+  }, [query])
+  const typed = query.trim()
+  const typedIsUrl = looksLikeUrl(typed)
+  const parsed = useMemo(() => (typed ? parseFontInput(typed) : null), [typed])
+  const typedIsCurated = !typedIsUrl && curatedFamilies.some((f) => f.family.toLowerCase() === typed.toLowerCase())
+
+  const chooseCurated = (name: string) => {
+    setRequested(null)
+    setStyleNote(null)
+    setFamily(name)
+  }
+  const chooseParsed = (request: ParsedFontRequest) => {
+    setRequested(request)
+    setFamily(request.family)
+  }
+
+  const info = familyState.kind === 'ready' ? familyState.info : null
+  const styleWeights = info ? (italic ? info.weights.italic : info.weights.normal) : []
+  const canLoad = info !== null && styleWeights.includes(weight)
+
+  const load = () => {
+    if (!canLoad || !family) return
+    onLoad({ family, weight, italic, subset })
+    onClose()
+  }
+
+  /** Enter in the search field: select what was typed (or its best match), and load it once it is the selection. */
+  const submitSearch = () => {
+    const choice = enterChoice(
+      typed,
+      parsed,
+      curatedFamilies.map((f) => f.family),
+    )
+    if (!choice) return
+    const { request } = choice
+    const selected = request
+      ? requested !== null && requested.weight === request.weight && requested.italic === request.italic
+      : requested === null
+    if (family === choice.family && selected) load()
+    else if (request) chooseParsed(request)
+    else chooseCurated(choice.family)
+  }
+
+  const changeItalic = (next: boolean) => {
+    setItalic(next)
+    if (info) {
+      const weights = next ? info.weights.italic : info.weights.normal
+      if (!weights.includes(weight)) setWeight(defaultWeight(weights))
+    }
+  }
+
+  return (
+    <dialog
+      ref={dialogRef}
+      className="gf-dialog"
+      aria-labelledby="gf-title"
+      onClose={onClose}
+      onCancel={(e) => {
+        e.preventDefault()
+        onClose()
+      }}
+    >
+      <form
+        method="dialog"
+        className="gf-body"
+        onSubmit={(e) => {
+          e.preventDefault()
+          load()
+        }}
+      >
+        <header className="gf-head">
+          <h2 id="gf-title">Google Fonts</h2>
+          <button type="button" className="button-small" onClick={onClose} aria-label="Close">
+            <Icon name="close" />
+          </button>
+        </header>
+
+        <p id="gf-intro" className="gf-intro">
+          Pick a font, type a family name exactly as on fonts.google.com, or paste a fonts.google.com or
+          fonts.googleapis.com link.
+        </p>
+
+        <div className="gf-columns">
+          <div className="gf-families">
+            <label htmlFor="gf-search">Family</label>
+            <input
+              id="gf-search"
+              type="search"
+              placeholder="Search, family name, or Google Fonts URL"
+              value={query}
+              autoComplete="off"
+              spellCheck={false}
+              ref={searchRef}
+              aria-describedby="gf-intro"
+              onChange={(e) => setQuery(e.target.value)}
+              onKeyDown={(e) => {
+                // Enter on typed text selects what it names instead of submitting the earlier selection.
+                if (e.key === 'Enter' && typed) {
+                  e.preventDefault()
+                  submitSearch()
+                }
+              }}
+            />
+            {typedIsUrl && parsed && !parsed.ok && (
+              <p className="font-warning" role="alert">
+                {parsed.error}
+              </p>
+            )}
+            <ul className="gf-list" aria-label="Families">
+              {typedIsUrl && parsed?.ok && (
+                <li>
+                  <button
+                    type="button"
+                    className="gf-family"
+                    aria-pressed={family === parsed.request.family && requested !== null}
+                    onClick={() => chooseParsed(parsed.request)}
+                  >
+                    Use “{parsed.request.family}” from URL<span className="gf-category">URL</span>
+                  </button>
+                </li>
+              )}
+              {!typedIsUrl &&
+                matches.map((f) => (
+                  <li key={f.family}>
+                    <button
+                      type="button"
+                      className="gf-family"
+                      aria-pressed={family === f.family}
+                      onClick={() => chooseCurated(f.family)}
+                    >
+                      {f.family}
+                      <span className="gf-category">{f.category}</span>
+                    </button>
+                  </li>
+                ))}
+              {typed && !typedIsUrl && !typedIsCurated && parsed?.ok && (
+                <li>
+                  <button
+                    type="button"
+                    className="gf-family"
+                    aria-pressed={family === parsed.request.family}
+                    onClick={() => chooseParsed(parsed.request)}
+                  >
+                    Use “{parsed.request.family}”<span className="gf-category">Custom</span>
+                  </button>
+                </li>
+              )}
+              {typed && !typedIsUrl && parsed && !parsed.ok && <li className="gf-invalid">{parsed.error}</li>}
+            </ul>
+          </div>
+
+          <div className="gf-styles" aria-live="polite">
+            {familyState.kind === 'idle' && <p className="gf-placeholder">Choose a family to see its styles.</p>}
+
+            {familyState.kind === 'loading' && (
+              <p className="gf-placeholder">
+                <span className="spinner" aria-hidden="true" />
+                Looking up {family}…
+              </p>
+            )}
+
+            {familyState.kind === 'error' && (
+              <div className="font-error" role="alert">
+                <p className="font-error-kind">{errorKindLabel[familyState.error.kind]}</p>
+                <p>{familyState.error.message}</p>
+                <button type="button" className="button-small" onClick={() => setAttempt((n) => n + 1)}>
+                  <Icon name="retry" />
+                  Retry
+                </button>
+              </div>
+            )}
+
+            {info && (
+              <>
+                <p className="gf-selected">{info.family}</p>
+                {requested && requested.source !== 'name' && (
+                  <p className="field-hint">
+                    From {requested.source === 'specimen' ? 'a specimen page' : 'a CSS API'} URL. The font file is still
+                    downloaded and parsed before it can be used.
+                  </p>
+                )}
+                {requested && requested.unsupportedAxes.length > 0 && (
+                  <p className="font-warning">
+                    The URL sets axes this app cannot apply ({requested.unsupportedAxes.join(', ')}). They are ignored
+                    and stay at their defaults.
+                  </p>
+                )}
+                {requested?.notes.map((note) => (
+                  <p key={note} className="field-hint">
+                    {note}
+                  </p>
+                ))}
+                {styleNote && <p className="font-warning">{styleNote}</p>}
+                <div className="field">
+                  <label htmlFor="gf-weight">Weight</label>
+                  <select id="gf-weight" value={weight} onChange={(e) => setWeight(Number(e.target.value))}>
+                    {styleWeights.map((w) => (
+                      <option key={w} value={w}>
+                        {w} {WEIGHT_LABELS[w] ?? ''}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div className="field field-toggle">
+                  <input
+                    id="gf-italic"
+                    type="checkbox"
+                    checked={italic}
+                    disabled={info.weights.italic.length === 0 || info.weights.normal.length === 0}
+                    onChange={(e) => changeItalic(e.target.checked)}
+                  />
+                  <label htmlFor="gf-italic">Italic{info.weights.italic.length === 0 ? ' (not available)' : ''}</label>
+                </div>
+                <div className="field">
+                  <label htmlFor="gf-subset">Character subset</label>
+                  <select id="gf-subset" value={subset} onChange={(e) => setSubset(e.target.value)}>
+                    {namedSubsets(info).length > 0 && <option value={ALL_SUBSETS}>All</option>}
+                    {info.subsets.map((s) => (
+                      <option key={s} value={s}>
+                        {s}
+                      </option>
+                    ))}
+                  </select>
+                  <p className="field-hint">
+                    Google serves each subset as a separate file. All loads the main one (latin when there is one).
+                  </p>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+
+        <footer className="gf-foot">
+          <button type="button" onClick={onClose}>
+            Cancel
+          </button>
+          <button type="submit" className="button-primary" disabled={!canLoad}>
+            <Icon name="download" />
+            Load font
+          </button>
+        </footer>
+      </form>
+    </dialog>
+  )
+}

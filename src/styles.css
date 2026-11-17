@@ -1,0 +1,989 @@
+/* None-Curve Acid. Colour tokens, base controls, panel groups, switches, segmented buttons, the font notices and the
+   Google Fonts dialog are copied from None-Curve src/styles.css so the tool looks like part of the family; the layout
+   at the end is this tool's own. */
+
+:root {
+  /* Every themed colour is light-dark(light, dark). The theme follows the system until the toggle in
+     the status bar sets data-theme, which switches color-scheme and with it every token. */
+  --bg: light-dark(#f4f4f2, #0e0e0d);
+  --surface: light-dark(#ffffff, #171716);
+  --canvas: light-dark(#fbfbfa, #121211);
+  --text: light-dark(#111110, #f2f1ed);
+  --muted: light-dark(#5f5e5a, #a8a7a1);
+  /* Secondary text that informs (hints, units, labels): at least 4.5:1 on --bg, --surface and --canvas in both themes
+     (light 4.6 to 5.1, dark 4.9 to 5.2). */
+  --subtle: light-dark(#6f6e69, #868580);
+  /* Disabled and inactive states, and decorative strokes: fainter than any text that informs. */
+  --faint: light-dark(#9a9994, #6e6d68);
+  --border: light-dark(#d6d5d0, #2e2d2a);
+  --border-strong: light-dark(#111110, #f2f1ed);
+  /* Accent: canvas drawings (skeleton, original curves); interactive UI uses the primary mint, and the
+     glyph selection a brighter version of the text colour. */
+  --accent: light-dark(#1f4fd1, #7ea2ff);
+  --guide: light-dark(#c9c8c2, #3a3936);
+  --grid: light-dark(rgba(17, 17, 16, 0.05), rgba(242, 241, 237, 0.05));
+  --focus: var(--primary-strong);
+  --danger: light-dark(#b42318, #ff8a7a);
+  --control: light-dark(#c2410c, #ff9a5c);
+  --vertex: light-dark(#0f8a5f, #3ddc97);
+  /* Primary buttons: the same mint in both themes, with dark text for contrast. */
+  --primary: #adfce7;
+  --on-primary: #0b2a22;
+  /* On the light theme the mint nearly matches the white panels, so its edge is drawn darker. */
+  --primary-edge: light-dark(#3fae8f, #adfce7);
+  /* The mint for thin lines, outlines, and small text: deeper on the light theme so it stays visible. */
+  --primary-strong: light-dark(#0f7a5c, #adfce7);
+  /* The mint as a glow (outer light around selected controls); deeper on the light theme to show on white. */
+  --primary-glow: light-dark(rgba(63, 174, 143, 0.55), rgba(173, 252, 231, 0.6));
+  --mono: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  color-scheme: light dark;
+  font-family:
+    system-ui,
+    -apple-system,
+    'Segoe UI',
+    sans-serif;
+  /* Every other text size is in rem, so this one value scales the whole interface (75% of the browser's size, 12px by default; was 14px). */
+  font-size: 75%;
+  line-height: 1.5;
+}
+
+:root[data-theme='light'] {
+  color-scheme: light;
+}
+
+:root[data-theme='dark'] {
+  color-scheme: dark;
+}
+
+/* Browsers without light-dark() get the same tokens as plain values (a custom property accepts the function and fails
+   only where it is used). */
+@supports not (color: light-dark(red, blue)) {
+  :root {
+    --bg: #f4f4f2;
+    --surface: #ffffff;
+    --canvas: #fbfbfa;
+    --text: #111110;
+    --muted: #5f5e5a;
+    --subtle: #6f6e69;
+    --faint: #9a9994;
+    --border: #d6d5d0;
+    --border-strong: #111110;
+    --accent: #1f4fd1;
+    --guide: #c9c8c2;
+    --grid: rgba(17, 17, 16, 0.05);
+    --danger: #b42318;
+    --control: #c2410c;
+    --vertex: #0f8a5f;
+    --primary-edge: #3fae8f;
+    --primary-strong: #0f7a5c;
+    --primary-glow: rgba(63, 174, 143, 0.55);
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme='light']) {
+      --bg: #0e0e0d;
+      --surface: #171716;
+      --canvas: #121211;
+      --text: #f2f1ed;
+      --muted: #a8a7a1;
+      --subtle: #868580;
+      --faint: #6e6d68;
+      --border: #2e2d2a;
+      --border-strong: #f2f1ed;
+      --accent: #7ea2ff;
+      --guide: #3a3936;
+      --grid: rgba(242, 241, 237, 0.05);
+      --danger: #ff8a7a;
+      --control: #ff9a5c;
+      --vertex: #3ddc97;
+      --primary-edge: #adfce7;
+      --primary-strong: #adfce7;
+      --primary-glow: rgba(173, 252, 231, 0.6);
+    }
+  }
+
+  :root[data-theme='dark'] {
+    --bg: #0e0e0d;
+    --surface: #171716;
+    --canvas: #121211;
+    --text: #f2f1ed;
+    --muted: #a8a7a1;
+    --subtle: #868580;
+    --faint: #6e6d68;
+    --border: #2e2d2a;
+    --border-strong: #f2f1ed;
+    --accent: #7ea2ff;
+    --guide: #3a3936;
+    --grid: rgba(242, 241, 237, 0.05);
+    --danger: #ff8a7a;
+    --control: #ff9a5c;
+    --vertex: #3ddc97;
+    --primary-edge: #adfce7;
+    --primary-strong: #adfce7;
+    --primary-glow: rgba(173, 252, 231, 0.6);
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+}
+
+h1,
+h2,
+h3,
+p,
+ul,
+dl,
+dd {
+  margin: 0;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+/* ---- Base controls ---- */
+
+button,
+select,
+input[type='number'] {
+  font: inherit;
+  color: inherit;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
+  padding: 6px 12px;
+}
+
+button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+}
+
+/* Line icons in buttons (see Icon.tsx), sized with the button text. */
+.icon {
+  flex: none;
+  width: 1.15em;
+  height: 1.15em;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+button:disabled,
+button[aria-disabled='true'],
+select:disabled,
+input:disabled {
+  cursor: not-allowed;
+  color: var(--faint);
+  border-color: var(--border);
+  border-style: dashed;
+  background: transparent;
+}
+
+input[type='range'] {
+  width: 100%;
+  accent-color: var(--primary-strong);
+}
+
+input[type='checkbox'],
+input[type='radio'] {
+  accent-color: var(--primary-strong);
+}
+
+input[type='range']:disabled {
+  opacity: 0.4;
+}
+
+.pending {
+  font-size: 0.72rem;
+  padding: 0 5px;
+  border: 1px solid currentColor;
+  border-radius: 3px;
+  line-height: 1.4;
+}
+
+/* ---- Control panel ---- */
+
+.panel {
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.panel-notice {
+  font-size: 0.85rem;
+  color: var(--muted);
+  padding: 8px 10px;
+  border-left: 2px solid var(--primary-strong);
+  background: var(--bg);
+}
+
+.group {
+  margin: 0;
+  padding: 0 0 16px;
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+
+.group-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+
+.group legend {
+  padding: 0;
+  margin-bottom: 10px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.group:disabled legend {
+  color: var(--muted);
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.field-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+}
+
+.field output {
+  font-family: var(--mono);
+  font-size: 0.85rem;
+}
+
+.unit {
+  color: var(--subtle);
+  margin-left: 2px;
+}
+
+.field-hint {
+  font-size: 0.78rem;
+  color: var(--subtle);
+}
+
+.field-toggle {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+}
+
+/* An on/off switch (Drive letters): a checkbox with role="switch", drawn as a track whose knob slides right
+   when on. The checkbox itself lies invisibly over the track, so it keeps its click, keyboard and focus. */
+.switch {
+  position: relative;
+  flex: none;
+  display: inline-flex;
+}
+
+.switch input {
+  position: absolute;
+  /* Above the track (positioned after it), so a click on the track reaches the checkbox. */
+  z-index: 1;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.switch-track {
+  position: relative;
+  width: 26px;
+  height: 14px;
+  border: 1px solid var(--border-strong);
+  border-radius: 7px;
+  background: var(--surface);
+  transition:
+    background-color 0.15s ease,
+    border-color 0.15s ease;
+}
+
+.switch-track::before {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--border-strong);
+  transition:
+    transform 0.15s ease,
+    background-color 0.15s ease;
+}
+
+.switch input:checked + .switch-track {
+  background: var(--primary);
+  border-color: var(--primary-edge);
+}
+
+.switch input:checked + .switch-track::before {
+  transform: translateX(12px);
+  background: var(--on-primary);
+}
+
+.switch input:focus-visible + .switch-track {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.switch input:disabled {
+  cursor: default;
+}
+
+.switch input:disabled + .switch-track {
+  border-color: var(--border);
+  background: var(--bg);
+}
+
+.switch input:disabled + .switch-track::before {
+  background: var(--faint);
+}
+
+/* A larger switch for a setting that changes the whole look (Return to plain). */
+.switch-large .switch-track {
+  width: 40px;
+  height: 22px;
+  border-radius: 11px;
+}
+
+.switch-large .switch-track::before {
+  top: 3px;
+  left: 3px;
+  width: 14px;
+  height: 14px;
+}
+
+.switch-large input:checked + .switch-track::before {
+  transform: translateX(18px);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .switch-track,
+  .switch-track::before {
+    transition: none;
+  }
+}
+
+/* High contrast: system colours replace the backgrounds, so the knob and the on state are drawn in them. */
+@media (forced-colors: active) {
+  .switch-track {
+    border-color: CanvasText;
+  }
+
+  .switch-track::before {
+    forced-color-adjust: none;
+    background: CanvasText;
+  }
+
+  .switch input:checked + .switch-track {
+    forced-color-adjust: none;
+    background: Highlight;
+    border-color: Highlight;
+  }
+
+  .switch input:checked + .switch-track::before {
+    background: HighlightText;
+  }
+
+  .switch input:disabled + .switch-track {
+    border-color: GrayText;
+  }
+
+  .switch input:disabled + .switch-track::before {
+    background: GrayText;
+  }
+}
+
+.group:disabled label,
+.group:disabled .field-label,
+.group:disabled output {
+  color: var(--faint);
+}
+
+/* A single control that has no effect right now (for example the seed at 0% randomness). */
+.field:has(input:disabled) > label,
+.field:has(input:disabled) .field-head label,
+.field:has(input:disabled) output,
+.field-toggle:has(input:disabled) label {
+  color: var(--faint);
+}
+
+/* Shown inside a group whose settings another step overrides. */
+.group-replaced {
+  font-size: 0.82rem;
+  color: var(--text);
+  padding: 8px 10px;
+  border-left: 2px solid var(--primary-strong);
+  background: var(--bg);
+}
+
+.segmented {
+  display: inline-flex;
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.segmented button {
+  border: 0;
+  border-radius: 0;
+  border-right: 1px solid var(--border);
+}
+
+.segmented button:last-child {
+  border-right: 0;
+}
+
+.segmented button[aria-pressed='true'] {
+  font-weight: 600;
+  background: var(--primary);
+  color: var(--on-primary);
+}
+
+.segmented button[aria-pressed='true']:disabled {
+  background: var(--border);
+  color: var(--muted);
+}
+
+.group:disabled .segmented,
+.segmented:has(button:disabled),
+.segmented:has(input:disabled) {
+  border-color: var(--border);
+  border-style: dashed;
+}
+
+/* ---- Buttons ---- */
+
+.button-primary {
+  background: var(--primary);
+  color: var(--on-primary);
+  border-color: var(--primary-edge);
+  font-weight: 600;
+}
+
+.button-small {
+  padding: 3px 10px;
+  font-size: 0.85rem;
+}
+
+.font-loading p,
+.gf-placeholder {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.spinner {
+  width: 12px;
+  height: 12px;
+  flex: none;
+  border: 2px solid var(--border);
+  border-top-color: var(--text);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .spinner {
+    animation: none;
+  }
+}
+
+.font-error {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--danger);
+  border-left-width: 3px;
+  font-size: 0.85rem;
+}
+
+.font-warning {
+  font-size: 0.78rem;
+  color: var(--muted);
+  border-left: 2px solid var(--control);
+  padding-left: 8px;
+}
+/* ---- Google Fonts dialog ---- */
+
+.gf-dialog {
+  width: min(720px, calc(100vw - 32px));
+  max-height: calc(100vh - 32px);
+  padding: 0;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+}
+
+.gf-dialog::backdrop {
+  background: rgba(0, 0, 0, 0.45);
+}
+
+.gf-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px;
+}
+
+.gf-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.gf-head h2 {
+  font-size: 1.1rem;
+}
+
+.gf-intro {
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+.gf-columns {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+}
+
+.gf-families {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.gf-families input {
+  font: inherit;
+  color: inherit;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
+  padding: 6px 10px;
+}
+
+.gf-list {
+  list-style: none;
+  padding: 0;
+  max-height: 280px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+}
+
+.gf-family {
+  width: 100%;
+  justify-content: space-between;
+  border: 0;
+  border-radius: 0;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+}
+
+.gf-family[aria-pressed='true'] {
+  background: var(--primary);
+  color: var(--on-primary);
+}
+
+.gf-category {
+  font-size: 0.72rem;
+  color: var(--subtle);
+}
+
+.gf-styles {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+
+.gf-placeholder {
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.gf-selected {
+  font-weight: 600;
+  font-size: 1rem;
+}
+
+.gf-foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+/* ---- This tool's layout ---- */
+
+.app {
+  height: 100vh;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr) auto;
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  gap: 12px 24px;
+  flex-wrap: wrap;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.brand {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+
+.brand h1 {
+  font-size: 1.25rem;
+  letter-spacing: -0.02em;
+}
+
+.brand-tag {
+  font-family: var(--mono);
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+
+.header-actions {
+  margin-left: auto;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.record-time {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.record-on .icon {
+  fill: currentColor;
+}
+
+.workspace {
+  display: grid;
+  grid-template-columns: minmax(280px, 340px) minmax(0, 1fr);
+  min-height: 0;
+}
+
+.app[data-panel='closed'] .workspace {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.side {
+  overflow-y: auto;
+  min-height: 0;
+  background: var(--surface);
+  border-right: 1px solid var(--border);
+}
+
+.group-summary {
+  cursor: pointer;
+  list-style: none;
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.group-summary::-webkit-details-marker {
+  display: none;
+}
+
+.group-summary::after {
+  content: '+';
+  font-family: var(--mono);
+  color: var(--subtle);
+}
+
+.group[open] > .group-summary::after {
+  content: '−';
+}
+
+.group[open] > .group-summary {
+  margin-bottom: 12px;
+}
+
+.field-label {
+  display: block;
+}
+
+.field-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: flex-end;
+}
+
+.field-row > .field {
+  flex: 1;
+  min-width: 0;
+}
+
+.field input[type='number'] {
+  width: 100%;
+}
+
+textarea {
+  font: inherit;
+  color: inherit;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
+  padding: 6px 10px;
+  resize: vertical;
+}
+
+.segmented {
+  align-self: flex-start;
+  flex-wrap: wrap;
+}
+
+.segmented button {
+  padding: 4px 10px;
+}
+
+.slot-actions,
+.stops-row,
+.presets {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.slot-actions select {
+  padding: 3px 6px;
+  font-size: 0.85rem;
+}
+
+.file-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 0.85rem;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dot {
+  width: 8px;
+  height: 8px;
+  flex: none;
+  border-radius: 50%;
+  border: 1.5px solid var(--faint);
+}
+
+.file-status[data-state='ready'] .dot {
+  background: var(--primary-strong);
+  border-color: var(--primary-strong);
+}
+
+.file-status[data-state='error'] .dot {
+  border-color: var(--danger);
+}
+
+.font-slot + .font-slot {
+  padding-top: 12px;
+  border-top: 1px dashed var(--border);
+}
+
+.color-field {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  align-items: center;
+  gap: 4px 8px;
+}
+
+.color-field label {
+  grid-column: 1 / -1;
+}
+
+input[type='color'] {
+  width: 32px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
+  background: none;
+  cursor: pointer;
+}
+
+.color-hex {
+  font-family: var(--mono);
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+.icon-button {
+  padding-inline: 6px;
+}
+
+.stops-bar {
+  position: relative;
+  height: 22px;
+  margin: 4px 7px 6px;
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
+  cursor: copy;
+}
+
+.stop-handle {
+  position: absolute;
+  top: 50%;
+  width: 14px;
+  height: 26px;
+  padding: 0;
+  transform: translate(-50%, -50%);
+  border: 2px solid var(--surface);
+  outline: 1px solid var(--border-strong);
+  border-radius: 3px;
+  cursor: ew-resize;
+  touch-action: none;
+}
+
+.stop-handle[aria-pressed='true'] {
+  outline: 2px solid var(--primary-strong);
+  box-shadow: 0 0 0 4px var(--primary-glow);
+}
+
+.preset {
+  padding: 3px 8px;
+  font-size: 0.8rem;
+}
+
+.preset-swatch {
+  width: 22px;
+  height: 10px;
+  border-radius: 2px;
+}
+
+.stage {
+  position: relative;
+  display: grid;
+  place-items: center;
+  min-width: 0;
+  min-height: 0;
+  padding: 24px;
+  background: var(--canvas);
+  overflow: hidden;
+  container-type: size;
+}
+
+.stage-frame {
+  position: relative;
+  box-shadow: 0 0 0 1px var(--border);
+}
+
+.stage[data-transparent] .stage-frame {
+  background: repeating-conic-gradient(var(--border) 0 25%, var(--surface) 0 50%) 0 0 / 16px 16px;
+}
+
+.acid-canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  cursor: none;
+  touch-action: none;
+}
+
+.brush-cursor {
+  position: absolute;
+  pointer-events: none;
+  transform: translate(-50%, -50%);
+  border: 1px solid rgba(255, 255, 255, 0.9);
+  outline: 1px solid rgba(0, 0, 0, 0.6);
+  border-radius: 50%;
+  mix-blend-mode: difference;
+}
+
+.status-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+  padding: 6px 16px;
+  border-top: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 0.75rem;
+}
+
+.status-error {
+  color: var(--danger);
+}
+
+@media (max-width: 720px) {
+  .workspace {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr) minmax(0, 1fr);
+  }
+
+  .side {
+    order: 2;
+    border-right: 0;
+    border-top: 1px solid var(--border);
+  }
+
+  .stage {
+    padding: 12px;
+  }
+}
