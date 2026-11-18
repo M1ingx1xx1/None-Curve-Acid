@@ -4,7 +4,7 @@
 // anchors (morphGlyph). Pure: no DOM.
 
 import type { Font, Glyph } from 'fontkit'
-import { glyphPolygon, placePolygon } from '../font/outline'
+import { densify, glyphPolygon, placePolygon } from '../font/outline'
 import { planMorph, type MorphPlan, type Track } from '../morph/pair'
 import type { PolygonGlyph } from '../morph/types'
 import type { Rect } from './mask'
@@ -50,6 +50,8 @@ export interface LayoutParams {
   fontSize: number
   lineHeight: number
   tracking: number
+  /** 0–1: extra anchors on long sides (0 none). */
+  anchorDensity?: number
 }
 
 const LAYOUT_FEATURES = { liga: false, clig: false, dlig: false, calt: false, rlig: false }
@@ -82,24 +84,52 @@ function stillTracks(glyph: PolygonGlyph): Track[] {
   })
 }
 
-/** A glyph of A and B's glyph for the same character, paired; cached. */
-export function pairGlyphs(a: FontLike, b: FontLike, glyphA: Glyph, glyphB: Glyph | null): GlyphPair {
+/** How far (canvas pixels) a flattened curve may stray from the true one. */
+export const CURVE_TOLERANCE_PX = 0.2
+
+/**
+ * The flattening tolerance in font units for glyphs drawn at `scale` (pixels per font unit), rounded down to a step of
+ * √2 so a size slider does not pair the glyphs again on every move.
+ */
+export function curveTolerance(scale: number): number {
+  const step = Math.ceil(2 * Math.log2(Math.max(1e-6, scale)))
+  return CURVE_TOLERANCE_PX / 2 ** (step / 2)
+}
+
+/** The longest side (a share of the em) at anchor density `density`; 0 for no extra anchors. */
+export function maxSideShare(density: number): number {
+  return density > 0 ? 0.008 + 0.12 * (1 - Math.min(1, density)) : 0
+}
+
+/**
+ * A glyph of A and B's glyph for the same character, paired; cached. `tolerance`: A's font units. `density`: extra
+ * anchors on long sides of both (anchorDensity).
+ */
+export function pairGlyphs(
+  a: FontLike,
+  b: FontLike,
+  glyphA: Glyph,
+  glyphB: Glyph | null,
+  tolerance: number,
+  density = 0,
+): GlyphPair {
   const fonts = `${a.id}:${b.id}`
   if (fonts !== cacheFonts) {
     pairCache.clear()
     cacheFonts = fonts
   }
-  const key = `${glyphA.id}:${glyphB?.id ?? -1}`
+  const key = `${glyphA.id}:${glyphB?.id ?? -1}:${tolerance}:${density}`
   const cached = pairCache.get(key)
   if (cached) return cached
-  const polyA = glyphPolygon(glyphA, a.unitsPerEm)
+  const maxSide = maxSideShare(density) * a.unitsPerEm
+  const polyA = densify(glyphPolygon(glyphA, tolerance), maxSide)
   let pair: GlyphPair
   if (!glyphB) {
     pair = { tracks: stillTracks(polyA), ...boxOf([polyA]), morphs: false }
   } else {
     const k = a.unitsPerEm / b.unitsPerEm
     const dx = (glyphA.advanceWidth - glyphB.advanceWidth * k) / 2
-    const polyB = placePolygon(glyphPolygon(glyphB, b.unitsPerEm), k, dx)
+    const polyB = densify(placePolygon(glyphPolygon(glyphB, tolerance / k), k, dx), maxSide)
     const plan: MorphPlan | null = planMorph(polyA, polyB)
     pair = plan
       ? { tracks: plan.tracks, ...boxOf([polyA, polyB]), morphs: true }
@@ -139,7 +169,7 @@ export function layoutScene(
       if (glyphA.path.commands.length > 0) {
         let glyphB: Glyph | null = cp !== undefined ? b.font.glyphForCodePoint(cp) : null
         if (glyphB && (glyphB.id === 0 || glyphB.path.commands.length === 0)) glyphB = null
-        const pair = pairGlyphs(a, b, glyphA, glyphB)
+        const pair = pairGlyphs(a, b, glyphA, glyphB, curveTolerance(scale), params.anchorDensity ?? 0)
         const gx = x + pos.xOffset * scale
         const gy = baseline - pos.yOffset * scale
         out.push({

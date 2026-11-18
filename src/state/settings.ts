@@ -62,6 +62,12 @@ export interface Settings {
   autoAngle: number
   /** Auto: canvas heights a second. */
   autoSpeed: number
+  /** Seep in: ms a stamped spot takes to rise to full (colour and shape), 0 at once. */
+  seepMs: number
+  /** 0–1: the brush outline pushed about by broad noise, so a big brush is not a circle. */
+  shapeWarp: number
+  /** 0–1: heavier and lighter patches inside the brush. */
+  density: number
   // Morph
   /** A→B band: 1 follows the brush falloff as it is, near 0 switches A to B at half strength. */
   band: number
@@ -70,6 +76,18 @@ export interface Settings {
   /** One t per glyph (the mean under its anchors) instead of per anchor, for comparison. */
   perGlyph: boolean
   fillRule: FillRule
+  /** ms the shape takes to rise on top of Seep in, so it changes after the colour arrives. */
+  morphLag: number
+  /** 0–1: how far past the brush the shape keeps changing, fading out. */
+  morphSpread: number
+  /** 0–1: extra anchors on long sides, so a change spreads along them. 0 adds none. */
+  anchorDensity: number
+  /** Strobe: letters under the brush jump between shapes. */
+  strobe: boolean
+  /** How far a strobe jump takes the shape, 0–1. */
+  strobeAmount: number
+  /** ms each strobe shape stays. */
+  strobeHoldMs: number
   // Acid
   stops: GradientStop[]
   slant: number
@@ -77,6 +95,13 @@ export interface Settings {
   noise: number
   glow: number
   spill: number
+  /** Wash: the colour as a field on the canvas (0 off), its body, edge variety and dissolve, all 0–1. */
+  wash: number
+  washBody: number
+  washEdge: number
+  washDissolve: number
+  /** 0–1: how far the colour spreads past the brush, joining nearby strokes. */
+  spread: number
   // Export
   fps: 30 | 60
 }
@@ -146,18 +171,32 @@ export const DEFAULT_SETTINGS: Settings = {
   autoY: 0.5,
   autoAngle: 0,
   autoSpeed: 0.35,
+  seepMs: 0,
+  shapeWarp: 0,
+  density: 0,
   band: 1,
   maxMorph: 1,
   morphEase: 'linear',
   perGlyph: false,
   fillRule: 'nonzero',
+  morphLag: 0,
+  morphSpread: 0,
+  anchorDensity: 0,
+  strobe: false,
+  strobeAmount: 0.5,
+  strobeHoldMs: 80,
   stops: PRESETS[0].stops,
   slant: 45,
   flow: 0.35,
   noise: 0.5,
   glow: 0.8,
   spill: 0.4,
-  fps: 30,
+  wash: 0,
+  washBody: 0.6,
+  washEdge: 0.5,
+  washDissolve: 0.2,
+  spread: 0,
+  fps: 60,
 }
 
 type NumberKey = { [K in keyof Settings]: Settings[K] extends number ? K : never }[keyof Settings]
@@ -182,6 +221,19 @@ export const RANGES: Record<Exclude<NumberKey, 'fps'>, readonly [number, number,
   autoY: [0, 1, 0.01],
   autoAngle: [0, 360, 1],
   autoSpeed: [0.05, 2, 0.01],
+  seepMs: [0, 3000, 10],
+  shapeWarp: [0, 1, 0.01],
+  density: [0, 1, 0.01],
+  morphLag: [0, 3000, 10],
+  morphSpread: [0, 1, 0.01],
+  anchorDensity: [0, 1, 0.05],
+  strobeAmount: [0, 1, 0.01],
+  strobeHoldMs: [16, 1000, 1],
+  wash: [0, 1, 0.01],
+  washBody: [0, 1, 0.01],
+  washEdge: [0, 1, 0.01],
+  washDissolve: [0, 1, 0.01],
+  spread: [0, 1, 0.01],
   band: [0, 1, 0.01],
   maxMorph: [0, 1, 0.01],
   slant: [0, 360, 1],
@@ -201,7 +253,7 @@ export const CHOICES = {
   morphEase: EASE_NAMES,
 } as const satisfies Partial<Record<keyof Settings, readonly string[]>>
 
-export const OUTPUT_HEIGHTS = [720, 1080, 1350, 1920, 2160] as const
+export const OUTPUT_HEIGHTS = [720, 1080, 1350, 1920, 2160, 2880, 3840] as const
 export const STOP_LIMITS = { min: 2, max: 8 } as const
 export const TEXT_LIMIT = 2000
 

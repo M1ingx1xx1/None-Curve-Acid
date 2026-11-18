@@ -11,7 +11,7 @@ describe('settings', () => {
     expect(s.mode).toBe(DEFAULT_SETTINGS.mode)
     expect(s.ink).toBe(DEFAULT_SETTINGS.ink)
     expect(s.stops).toEqual(DEFAULT_SETTINGS.stops)
-    expect(s.fps).toBe(30)
+    expect(s.fps).toBe(DEFAULT_SETTINGS.fps)
     expect(s.text).toBe(DEFAULT_SETTINGS.text)
   })
 

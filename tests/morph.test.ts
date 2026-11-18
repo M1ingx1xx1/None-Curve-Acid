@@ -2,7 +2,14 @@ import * as fontkit from 'fontkit'
 import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import { morphAmount } from '../src/acid/brush'
-import { layoutScene, morphGlyph, type FontLike, type GlyphPair, type PlacedGlyph } from '../src/acid/scene'
+import {
+  curveTolerance,
+  layoutScene,
+  morphGlyph,
+  type FontLike,
+  type GlyphPair,
+  type PlacedGlyph,
+} from '../src/acid/scene'
 import { glyphPolygon, placePolygon, signedArea } from '../src/font/outline'
 import { planMorph } from '../src/morph/pair'
 import type { PolygonGlyph } from '../src/morph/types'
@@ -157,9 +164,9 @@ describe('real font pair (Roboto → STIX Two Text)', () => {
       const g = glyphs[n]
       const k = a.unitsPerEm / b.unitsPerEm
       const glyphB = b.font.glyphForCodePoint(text.codePointAt(n)!)
-      const polyA = glyphPolygon(ga[n], a.unitsPerEm).contours.map((c) => c.points)
+      const polyA = glyphPolygon(ga[n], curveTolerance(g.scale)).contours.map((c) => c.points)
       const polyB = placePolygon(
-        glyphPolygon(glyphB, b.unitsPerEm),
+        glyphPolygon(glyphB, curveTolerance(g.scale) / k),
         k,
         (ga[n].advanceWidth - glyphB.advanceWidth * k) / 2,
       ).contours.map((c) => c.points)

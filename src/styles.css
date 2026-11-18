@@ -987,3 +987,18 @@ input[type='color'] {
     padding: 12px;
   }
 }
+
+.perf {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 4px 12px;
+  margin: 0;
+  font-size: 0.82rem;
+}
+.perf dt {
+  color: var(--subtle);
+}
+.perf dd {
+  margin: 0;
+  font-variant-numeric: tabular-nums;
+}

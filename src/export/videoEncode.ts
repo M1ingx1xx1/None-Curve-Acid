@@ -61,6 +61,8 @@ export interface RecordResult {
   format: VideoFormat
   fellBack: boolean
   durationMs: number
+  /** Ticks that got no frame of their own (the one before was held longer). */
+  dropped: number
 }
 
 export class LiveRecorder {
@@ -69,6 +71,7 @@ export class LiveRecorder {
   private canvas: HTMLCanvasElement
   private fps: number
   private nextTick = 0
+  private dropped = 0
   /** The sample captured last, waiting for the next one to set how long it lasts. */
   private held: { frame: VideoFrame; tick: number } | null = null
   private queue = 0
@@ -129,6 +132,7 @@ export class LiveRecorder {
     const plan = nextSample(elapsedMs, this.nextTick, this.fps)
     if (!plan) return
     if (this.queue >= MAX_QUEUE) return
+    this.dropped += plan.tick - this.nextTick
     const frame = new VideoFrame(this.canvas, { timestamp: Math.round((plan.tick / this.fps) * 1e6) })
     this.release(plan.tick)
     this.held = { frame, tick: plan.tick }
@@ -180,6 +184,7 @@ export class LiveRecorder {
       format: this.format,
       fellBack: this.fellBack,
       durationMs: (end / this.fps) * 1000,
+      dropped: this.dropped,
     }
   }
 

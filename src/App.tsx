@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { AcidEngine } from './acid/engine'
+import { FrameStats, type FrameSummary } from './acid/frameStats'
 import { SLANT_PRESETS } from './acid/gradient'
 import FontSlot, { type SlotState } from './components/FontSlot'
 import GoogleFontsDialog from './components/GoogleFontsDialog'
@@ -9,6 +10,7 @@ import StopsEditor from './components/StopsEditor'
 import { downloadFile, safeFileName } from './export/download'
 import type { LiveRecorder } from './export/videoEncode'
 import { toFontLoadError } from './font/errors'
+import { History } from './state/history'
 import { loadGoogleFont, type GoogleFontRequest } from './font/google'
 import { loadBuiltinFont, loadLocalFont, type LoadedFont } from './font/parse'
 import {
@@ -79,6 +81,7 @@ export default function App() {
   const [keepAlpha, setKeepAlpha] = useState(true)
   const [elapsed, setElapsed] = useState(0)
   const [stats, setStats] = useState({ fps: 0, morphed: 0, auto: false })
+  const [perf, setPerf] = useState<FrameSummary | null>(null)
   const [cursor, setCursor] = useState<{ x: number; y: number; r: number } | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
 
@@ -100,6 +103,29 @@ export default function App() {
     const t = setTimeout(() => saveSettings(settings), 300)
     return () => clearTimeout(t)
   }, [settings])
+
+  // Undo / redo (⌘Z / ⇧⌘Z, Ctrl+Z / Ctrl+Y) over every setting: a change counts as a step once it settles.
+  const historyRef = useRef<History<Settings> | null>(null)
+  historyRef.current ??= new History(settings)
+  useEffect(() => {
+    const t = setTimeout(() => historyRef.current?.commit(settings), 400)
+    return () => clearTimeout(t)
+  }, [settings])
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!(e.metaKey || e.ctrlKey) || e.altKey) return
+      const key = e.key.toLowerCase()
+      const redo = (key === 'z' && e.shiftKey) || (key === 'y' && e.ctrlKey && !e.metaKey)
+      if (key !== 'z' && !redo) return
+      e.preventDefault()
+      const h = historyRef.current
+      const now = settingsRef.current
+      const next = h && (redo ? h.redo(now) : h.undo(now))
+      if (next) setSettings(next)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [])
 
   // Font loading.
   const loads = useRef<Record<Slot, AbortController | null>>({ a: null, b: null })
@@ -151,7 +177,9 @@ export default function App() {
     engineRef.current = engine
     let raf = 0
     let lastStats = 0
+    const frames = new FrameStats()
     const tick = (now: number) => {
+      const t0 = performance.now()
       raf = requestAnimationFrame(tick)
       const f = fontsRef.current
       const s = settingsRef.current
@@ -160,8 +188,10 @@ export default function App() {
       const look = rec?.opaque && s.transparent ? { ...s, transparent: false } : s
       engine.frame(now, look, f.a.kind === 'ready' ? f.a.font : null, f.b.kind === 'ready' ? f.b.font : null)
       if (rec) rec.rec.frame(now - rec.startedAt)
+      frames.record(now, performance.now() - t0)
       if (now - lastStats > 250) {
         lastStats = now
+        setPerf(frames.summary())
         setStats({ fps: 1000 / engine.frameMs, morphed: engine.morphed, auto: engine.autoActive })
         if (rec) setElapsed(now - rec.startedAt)
       }
@@ -220,6 +250,9 @@ export default function App() {
       const notes = [
         result.fellBack ? 'This browser cannot write MP4: saved as WebM.' : '',
         settings.transparent && result.format === 'webm' && keepAlpha ? 'Transparent background (WebM, VP9).' : '',
+        result.dropped > 0
+          ? `${result.dropped} of ${Math.round((result.durationMs * settings.fps) / 1000)} frames repeated (the page drew slower than ${settings.fps} fps).`
+          : '',
       ].filter(Boolean)
       setRecord({
         kind: 'idle',
@@ -285,20 +318,20 @@ export default function App() {
           <aside className="side panel" aria-label="Settings">
             <Section title="Fonts">
               <FontSlot
+                title="A · Base font"
+                hint={fontHint('a')}
+                state={fonts.a}
+                onFile={(file) => loadFont('a', file.name, () => loadLocalFont(file))}
+                onGoogle={() => setGoogle('a')}
+                onBuiltin={(file) => loadChoice('a', { kind: 'builtin', file })}
+              />
+              <FontSlot
                 title="B · NC font"
                 hint={fontHint('b')}
                 state={fonts.b}
                 onFile={(file) => loadFont('b', file.name, () => loadLocalFont(file))}
                 onGoogle={() => setGoogle('b')}
                 onBuiltin={(file) => loadChoice('b', { kind: 'builtin', file })}
-              />
-              <FontSlot
-                title="A · base font"
-                hint={fontHint('a')}
-                state={fonts.a}
-                onFile={(file) => loadFont('a', file.name, () => loadLocalFont(file))}
-                onGoogle={() => setGoogle('a')}
-                onBuiltin={(file) => loadChoice('a', { kind: 'builtin', file })}
               />
             </Section>
 
@@ -418,6 +451,28 @@ export default function App() {
                 format={percent}
                 onChange={(v) => set('strength', v)}
               />
+              <Slider
+                label="Shape warp"
+                value={settings.shapeWarp}
+                range={RANGES.shapeWarp}
+                onChange={(v) => set('shapeWarp', v)}
+                hint="Pushes the outline about, so a big brush is not a circle."
+              />
+              <Slider
+                label="Density"
+                value={settings.density}
+                range={RANGES.density}
+                onChange={(v) => set('density', v)}
+                hint="Heavier and lighter patches inside the brush."
+              />
+              <Slider
+                label="Seep in"
+                value={settings.seepMs}
+                range={RANGES.seepMs}
+                format={(v) => `${(v / 1000).toFixed(2)} s`}
+                onChange={(v) => set('seepMs', v)}
+                hint="How long a painted spot takes to rise to full colour and shape. 0: at once."
+              />
               {settings.mode !== 'hold' && (
                 <>
                   <Slider
@@ -520,6 +575,55 @@ export default function App() {
                 onChange={(v) => set('perGlyph', v)}
                 hint="One amount per letter instead of per anchor, for comparison."
               />
+              <Slider
+                label="Morph lag"
+                value={settings.morphLag}
+                range={RANGES.morphLag}
+                format={(v) => `${(v / 1000).toFixed(2)} s`}
+                onChange={(v) => set('morphLag', v)}
+                hint="The shape takes this much longer than the colour to change."
+              />
+              <Slider
+                label="Morph spread"
+                value={settings.morphSpread}
+                range={RANGES.morphSpread}
+                format={percent}
+                onChange={(v) => set('morphSpread', v)}
+                hint="The change reaches past the brush and fades out, so it passes to the letters around."
+              />
+              <Slider
+                label="Anchor density"
+                value={settings.anchorDensity}
+                range={RANGES.anchorDensity}
+                format={percent}
+                onChange={(v) => set('anchorDensity', v)}
+                hint="Adds anchors along long sides of A and B (their own anchors stay), so a stretch runs along them."
+              />
+              <Toggle
+                label="Strobe"
+                checked={settings.strobe}
+                onChange={(v) => set('strobe', v)}
+                hint="Letters under the brush jump between shapes."
+              />
+              {settings.strobe && (
+                <>
+                  <Slider
+                    label="Strobe strength"
+                    value={settings.strobeAmount}
+                    range={RANGES.strobeAmount}
+                    format={percent}
+                    onChange={(v) => set('strobeAmount', v)}
+                  />
+                  <Slider
+                    label="Strobe hold"
+                    value={settings.strobeHoldMs}
+                    range={RANGES.strobeHoldMs}
+                    format={(v) => `${Math.round(v)} ms`}
+                    onChange={(v) => set('strobeHoldMs', v)}
+                    hint="How long each shape stays."
+                  />
+                </>
+              )}
               <Segmented
                 label="Fill rule"
                 value={settings.fillRule}
@@ -560,6 +664,50 @@ export default function App() {
                 format={percent}
                 onChange={(v) => set('spill', v)}
                 hint="The glow outside the letters; 0 colours inside only."
+              />
+              <Slider
+                label="Wash"
+                value={settings.wash}
+                range={RANGES.wash}
+                format={percent}
+                onChange={(v) => set('wash', v)}
+                hint="The colour as a field over the canvas where the brush has been, not only in the letters."
+              />
+              {settings.wash > 0 && (
+                <>
+                  <Slider
+                    label="Wash body"
+                    value={settings.washBody}
+                    range={RANGES.washBody}
+                    format={percent}
+                    onChange={(v) => set('washBody', v)}
+                    hint="0: a soft falloff. 100%: a solid patch with an edge."
+                  />
+                  <Slider
+                    label="Edge variety"
+                    value={settings.washEdge}
+                    range={RANGES.washEdge}
+                    format={percent}
+                    onChange={(v) => set('washEdge', v)}
+                    hint="How much the edge changes from hard to soft along it."
+                  />
+                  <Slider
+                    label="Dissolve"
+                    value={settings.washDissolve}
+                    range={RANGES.washDissolve}
+                    format={percent}
+                    onChange={(v) => set('washDissolve', v)}
+                    hint="Patches that fade into the background."
+                  />
+                </>
+              )}
+              <Slider
+                label="Spread"
+                value={settings.spread}
+                range={RANGES.spread}
+                format={percent}
+                onChange={(v) => set('spread', v)}
+                hint="The colour spreads past the brush and joins nearby strokes."
               />
             </Section>
 
@@ -683,6 +831,42 @@ export default function App() {
                 </button>
               </div>
               {notice && <p className="field-hint">{notice}</p>}
+            </Section>
+
+            <Section title="Performance">
+              {perf ? (
+                <dl className="perf">
+                  <dt>Frame rate</dt>
+                  <dd>{perf.fps.toFixed(1)} fps</dd>
+                  <dt>Screen</dt>
+                  <dd>{Math.round(perf.refreshHz)} Hz</dd>
+                  <dt>Frame gap</dt>
+                  <dd>
+                    {perf.avgMs.toFixed(1)} ms avg · {perf.worstMs.toFixed(1)} max
+                  </dd>
+                  <dt>Draw (CPU)</dt>
+                  <dd>
+                    {perf.workAvgMs.toFixed(1)} ms avg · {perf.workMaxMs.toFixed(1)} max
+                  </dd>
+                  <dt>Late frames</dt>
+                  <dd>{perf.late} in the last second</dd>
+                  <dt>{settings.fps} fps video</dt>
+                  {/* The video takes a frame every 1000 / fps ms: a gap longer than that leaves a tick with none. */}
+                  <dd className={perf.worstMs <= (1000 / settings.fps) * 1.05 ? undefined : 'status-error'}>
+                    {perf.worstMs <= (1000 / settings.fps) * 1.05
+                      ? 'Keeps up'
+                      : perf.fps >= settings.fps
+                        ? 'Some frames repeat'
+                        : 'Too slow: frames repeat'}
+                  </dd>
+                </dl>
+              ) : (
+                <p className="field-hint">Measuring…</p>
+              )}
+              <p className="field-hint">
+                Over the last second. Draw time is the page's own work per frame; the GPU's comes after it and shows in
+                the frame gap. Paint while you watch: an idle canvas is cheap.
+              </p>
             </Section>
           </aside>
         )}

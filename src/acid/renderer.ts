@@ -4,7 +4,9 @@
 //    texture. Self-intersections of an in-between outline are handled by the fill rule.
 // 2. Glow: coverage × the colour mask at a quarter of the size, blurred (separable Gaussian, two rounds) by Bleed.
 // 3. Composite: one shader paints ink, the acid gradient (domain-warped noise, flowing, with brighter blotches), the
-//    glow inside the letters and the halo spilling out of them, over the background or transparent.
+//    glow inside the letters, the halo spilling out of them and the wash (a colour field straight from the colour
+//    mask, with an edge that is hard in places, soft in others and dissolves in a few), over the background or
+//    transparent.
 
 import type { GradientStop } from '../state/settings'
 import { hexToRgb, slantDirection, type Rgb } from './gradient'
@@ -19,6 +21,11 @@ export interface FrameLook {
   noise: number
   glow: number
   spill: number
+  /** Wash: the colour field's opacity (0 off), body (0 soft falloff, 1 solid with an edge), edge variety, dissolve. */
+  wash: number
+  washBody: number
+  washEdge: number
+  washDissolve: number
   bleed: number
   fillRule: 'nonzero' | 'evenodd'
   /** Seconds since start, for the flowing colour. */
@@ -98,6 +105,10 @@ uniform float uTime;
 uniform float uNoise;
 uniform float uGlowAmt;
 uniform float uSpill;
+uniform float uWash;
+uniform float uWashBody;
+uniform float uWashEdge;
+uniform float uWashDissolve;
 out vec4 o;
 
 float hash(vec2 p) {
@@ -160,18 +171,36 @@ void main() {
   float blot = smoothstep(0.5, 0.82, fbm(w * 0.8 + vec2(-uTime * 0.2, uTime * 0.13) + 31.0));
   col = saturateColor(col * (1.0 + 0.45 * blot * uNoise), 0.35 + 0.4 * blot * uNoise);
 
-  // Inside the letters: ink where the brush has not been, glowing acid colour where it has.
+  // Wash: the colour mask itself as a field of colour, warped by slow noise so its edge rises and recedes. How sharp
+  // the edge is varies from place to place (Edge variety), and some patches fade out into the background (Dissolve).
+  float wash = 0.0;
+  if (uWash > 0.0) {
+    vec2 g = q * 3.0;
+    vec2 warp = vec2(fbm(g + vec2(uTime * 0.11, 5.3)), fbm(g + vec2(-7.1, -uTime * 0.09))) - 0.5;
+    float f = texture(uMask, (p + warp * vec2(1.0 / uAspect, 1.0) * 0.05 * (0.3 + uWashEdge)) * uMaskScale).g;
+    float sharp = smoothstep(0.3, 0.7, fbm(g * 0.6 + vec2(11.0, uTime * 0.05)));
+    float soft = mix(0.16, mix(0.42, 0.012, sharp), uWashEdge);
+    float body = smoothstep(0.3 - soft, 0.3 + soft, f);
+    float a = mix(f, max(body, f * 0.5), uWashBody);
+    float gone = smoothstep(0.42, 0.78, fbm(g * 0.8 + vec2(-23.0, uTime * 0.07)));
+    wash = clamp(a * (1.0 - uWashDissolve * gone) * uWash, 0.0, 1.0);
+  }
+  vec3 washCol = saturateColor(col, 0.2);
+
+  // Inside the letters: ink where the brush has not been, glowing acid colour where it has. Over the wash, part of the
+  // ink stays so the letters show in the colour.
   vec3 lit = col * (1.0 + 0.3 * uGlowAmt * c);
-  vec3 letter = mix(uInk, lit, c) + col * glow * uGlowAmt * 0.45;
-  // Outside them: the halo the lit letters throw (none at Spill 0).
+  vec3 letter = mix(uInk, lit, c * (1.0 - 0.45 * wash)) + col * glow * uGlowAmt * 0.45;
+  // Outside them: the halo the lit letters throw (none at Spill 0), and the wash.
   float halo = clamp(glow * uGlowAmt * uSpill * 1.6, 0.0, 1.0);
   vec3 haloCol = saturateColor(col * 1.15, 0.3);
 
   if (uTransparent > 0.5) {
-    float a = cov + (1.0 - cov) * halo;
-    o = vec4(clamp(letter, 0.0, 1.0) * cov + haloCol * halo * (1.0 - cov), a);
+    float out_a = 1.0 - (1.0 - halo) * (1.0 - wash);
+    vec3 out_c = haloCol * halo * (1.0 - wash) + washCol * wash;
+    o = vec4(clamp(letter, 0.0, 1.0) * cov + out_c * (1.0 - cov), cov + (1.0 - cov) * out_a);
   } else {
-    vec3 bg = mix(uBg, haloCol, halo);
+    vec3 bg = mix(mix(uBg, haloCol, halo), washCol, wash);
     o = vec4(mix(bg, clamp(letter, 0.0, 1.0), cov), 1.0);
   }
 }`
@@ -271,6 +300,10 @@ export class AcidRenderer {
       'uNoise',
       'uGlowAmt',
       'uSpill',
+      'uWash',
+      'uWashBody',
+      'uWashEdge',
+      'uWashDissolve',
     ])
     this.vao = gl.createVertexArray()!
     this.vbo = gl.createBuffer()!
@@ -474,6 +507,10 @@ export class AcidRenderer {
     gl.uniform1f(c.u.uNoise, look.noise)
     gl.uniform1f(c.u.uGlowAmt, look.glow)
     gl.uniform1f(c.u.uSpill, look.spill)
+    gl.uniform1f(c.u.uWash, look.wash)
+    gl.uniform1f(c.u.uWashBody, look.washBody)
+    gl.uniform1f(c.u.uWashEdge, look.washEdge)
+    gl.uniform1f(c.u.uWashDissolve, look.washDissolve)
     this.quad(c, null)
   }
 

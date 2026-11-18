@@ -19,13 +19,13 @@ npm run build      # typecheck + 生产构建到 dist/
 
 ## 怎么用
 
-- **Fonts**：B 是必填（上传 TTF / OTF / WOFF / WOFF2，或选 Google Fonts / 内置字体）；A 同理。上传的字体不会保存，刷新后回到上次的内置或 Google 字体。
-- **Brush**：模式 Hold（保持到 Clear）/ Decay（按衰减时间和曲线淡出）/ Follow（悬停即画，笔刷用弹簧跟随指针）/ Auto（自动沿直线来回扫）。Hold、Decay 需要按住拖动。半径、硬度、晕开（Bleed）、颜色额外宽度（Colour reach）、边缘不规则、强度。Auto：设起点（Start X / Y）和角度（8 个方向快捷键 + 0–360° 滑杆，0° 从左到右，90° 从下到上）、速度；笔刷从起点沿角度走到对面边缘外一个半径处，再原路返回，往复循环，轨迹按 Fade time / Fade curve 淡出；鼠标一动就接管，停下 1.5 秒后交还。
-- **Morph**：A→B 过渡带宽度、形变上限（0.5 = 最多到 A、B 的平均形状）、形变曲线、「按整字插值」对比开关、填充规则（nonzero / even-odd）。
-- **Acid**：色标（拖动位置、点条添加、选中改色或删除、反转）、4 组预设、Gradient Slant（0/45/90/135/180 快捷 + 滑杆）、流速、噪声、辉光、字外溢出（Spill，0 = 只在字内着色）。
+- **Fonts**：A 是底层字体（Base），B 是 NC 字体。B 是必填（上传 TTF / OTF / WOFF / WOFF2，或选 Google Fonts / 内置字体）；A 同理。上传的字体不会保存，刷新后回到上次的内置或 Google 字体。
+- **Brush**：模式 Hold（保持到 Clear）/ Decay（按衰减时间和曲线淡出）/ Follow（悬停即画，笔刷用弹簧跟随指针）/ Auto（自动沿直线来回扫）。Hold、Decay 需要按住拖动。半径、硬度、晕开（Bleed）、颜色额外宽度（Colour reach）、边缘不规则、强度。Shape warp（大尺度噪声推挤笔刷轮廓，半径大时不再是圆）、Density（笔刷内浓淡不均）、Seep in（涂到的地方用多久从 0 升到满，颜色和形变都慢慢渗入；0 = 立即）。Auto：设起点（Start X / Y）和角度（8 个方向快捷键 + 0–360° 滑杆，0° 从左到右，90° 从下到上）、速度；笔刷从起点沿角度走到对面边缘外一个半径处，再原路返回，往复循环，轨迹按 Fade time / Fade curve 淡出；鼠标一动就接管，停下 1.5 秒后交还。
+- **Morph**：A→B 过渡带宽度、形变上限（0.5 = 最多到 A、B 的平均形状）、形变曲线、「按整字插值」对比开关、填充规则（nonzero / even-odd）。Morph lag（形变比颜色晚到多久）、Morph spread（形变越过笔刷向四周渐弱传开）、Anchor density（在 A、B 的长边上加锚点，原有锚点不动，尖角保留）、Strobe 频闪（笔刷下的字每隔 Hold 毫秒各自跳到另一个形变程度，Strength 调幅度）。
+- **Acid**：色标（拖动位置、点条添加、选中改色或删除、反转）、4 组预设、Gradient Slant（0/45/90/135/180 快捷 + 滑杆）、流速、噪声、辉光、字外溢出（Spill，0 = 只在字内着色）。Wash：直接用笔刷涂过的区域在画布上铺色面（不只在字里），Wash body（0 柔和衰减，1 实心色面带边界）、Edge variety（边缘软硬沿边变化）、Dissolve（部分区域淡入背景）；Spread：颜色越过笔刷扩散，把相邻笔触连成一片，淡出时边扩散边变淡。
 - **Canvas**：4:5 / 1:1 / 9:16 / 16:9 / 自定义，输出高度；墨色、背景色、透明底。画布内部分辨率就是输出分辨率，预览只是缩放显示。
 - **录制与导出**：顶栏 Record 点一下开始、再点停止，录多长导出多长（按帧时钟取样，见下）。默认 MP4，浏览器写不了 MP4 时退回 WebM。透明底时会提示 MP4 不支持透明，可选「Keep transparency」录 WebM（VP9 带 alpha），否则 MP4 录制期间铺上背景色。PNG 导出当前帧，透明底时 PNG 也透明。
-- **设置**：自动保存在浏览器（localStorage）；Export / Import settings 导出导入 JSON；Reset all 一键重置。
+- **设置**：⌘Z / Ctrl+Z 撤销任意设置改动（含文字），⇧⌘Z / Ctrl+Y 重做；一次拖动或一段连续输入算一步，涂抹的笔画不在撤销范围内。自动保存在浏览器（localStorage）；Export / Import settings 导出导入 JSON；Reset all 一键重置。
 
 ## 实现概要
 
@@ -35,7 +35,9 @@ npm run build      # typecheck + 生产构建到 dist/
 | 锚点配对（A、B 锚点数不同时互相补点） | `src/morph/pair.ts` |
 | 每帧逐锚点插值：`位置 = A + t·(B − A)`，t 在锚点的 A 位置采样 mask | `src/acid/scene.ts` `morphGlyph` |
 | 笔刷硬度曲线、A→B 过渡带、形变曲线、形变上限 | `src/acid/brush.ts` |
-| 低分辨率 mask（morph / color 两通道），保持 / 衰减，脏矩形 | `src/acid/mask.ts` |
+| 低分辨率 mask（morph / color 两通道），保持 / 衰减、渗入、笔刷形状噪声，脏矩形 | `src/acid/mask.ts` |
+| Spread：mask 通道三次盒式模糊（近似高斯，耗时与半径无关）后叠在自身下面 | `src/acid/spread.ts` |
+| 撤销 / 重做 | `src/state/history.ts` |
 | WebGL2：stencil 填充（nonzero / even-odd）→ 4× MSAA 覆盖率；1/4 尺寸辉光模糊；一个合成着色器完成墨色、酸洗渐变（域扭曲噪声、流动、色斑）、字内辉光、字外光晕 | `src/acid/renderer.ts` |
 | 每帧调度：笔刷（指针 / 弹簧 / 自动路径）、mask 衰减、只重算 mask 变化区域内的字 | `src/acid/engine.ts` |
 | 录制（WebCodecs + Mediabunny） | `src/export/videoEncode.ts` |
@@ -43,11 +45,12 @@ npm run build      # typecheck + 生产构建到 dist/
 
 几点说明：
 
+- 曲线按像素误差拆成折线（不超过 0.2 px，随字号自动加密），输出 3840 高时字边也不会出现折线棱角。
 - 字不会被放大：B 按 A 的 em 等比放在 A 的字宽中央，只有锚点在 A、B 两个轮廓之间移动。
 - 颜色与形变用同一个 mask 的两个通道：color 通道半径是 morph 的 `1 + Colour reach` 倍，所以色晕比形变范围宽一点。边缘噪声固定在画布坐标上，重叠的笔触边缘一致。
 - 变体字体（如 Roboto）的轮廓没有合并，字怀可能由两个重叠轮廓围成。NC 的 `attachPairs` 会让 B 的字怀贴着 A 的边长出来，在这种字体上 t = 0 时会把 A 的字怀填黑。这里加了 `flatAt`：贴附端不是"扁的"（面积超过自身 5%）时改为从中心点长出 / 缩回。`tests/morph.test.ts` 用 nonzero 绕数在网格上逐点验证 t = 0 恰好是 A、t = 1 恰好是 B。
 - 录制按帧时钟取样：每帧画完立即抓取，时间戳是它所在的 tick，持续到下一个样本；编码器跟不上时跳过 tick、前一个样本自动拉长。实测 2.0 s / 3.18 s / 2.51 s 的录制解码时长分别为 2.000 / 3.167 / 2.500 s（按帧取整）。
-- 性能：1080×1350 下每帧（含 GPU 同步）平均 5–13 ms，1728×2160 约 5 ms；预览目标 60 fps，录制 30 / 60 fps 可选。
+- 性能：1080×1350 下每帧（含 GPU 同步）平均 5–13 ms，1728×2160 约 5 ms；预览跟随屏幕刷新率，录制默认 60 fps（可选 30）。页面画得比录制帧率慢时，保存后会提示有多少帧被重复。
 
 ## 从 None-Curve 复制的代码
 

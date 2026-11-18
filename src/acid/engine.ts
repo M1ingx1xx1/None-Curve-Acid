@@ -9,9 +9,28 @@ import { intersects, MaskField, type StampParams } from './mask'
 import { Spring2, sweepPath, type Point2 } from './motion'
 import { AcidRenderer } from './renderer'
 import { layoutScene, morphGlyph, type PlacedGlyph } from './scene'
+import { spreadField } from './spread'
 
 /** Without pointer moves for this long (ms), the auto brush takes over again. */
 export const AUTO_HANDBACK_MS = 1500
+
+/** Spread at 1 reaches this many brush radii past the stroke. */
+const SPREAD_RADII = 1.5
+
+/** A hash of two integers into 0–1 (the strobe's per-letter jumps). */
+function hash01(a: number, b: number): number {
+  let h = Math.imul(a | 0, 0x27d4eb2d) ^ Math.imul(b | 0, 0x165667b1)
+  h = Math.imul(h ^ (h >>> 15), 0x85ebca6b)
+  h = Math.imul(h ^ (h >>> 13), 0xc2b2ae35)
+  return ((h ^ (h >>> 16)) >>> 0) / 4294967296
+}
+
+/** The strobe's t for a glyph: `t` pushed up or down by up to `amount` of the way, fixed for one hold period. */
+export function strobeT(t: number, amount: number, glyph: number, period: number): number {
+  if (!(t > 0)) return t
+  const r = hash01(glyph, period) * 2 - 1
+  return Math.min(1, Math.max(0, r > 0 ? t + r * amount * (1 - t) : t + r * amount * t))
+}
 
 /** The mask cell size (canvas pixels) for a canvas `height` pixels tall: about 320 rows. */
 export function maskCell(height: number): number {
@@ -36,6 +55,12 @@ export class AcidEngine {
   private brushPrev: Point2 | null = null
   private autoTime = 0
   private autoWas = false
+  /** The mask's channels after Spread (the mask's own arrays when there is none). */
+  private fieldM: Float32Array | null = null
+  private fieldC: Float32Array | null = null
+  private spreadTmp: Float32Array | null = null
+  private spreadKey = ''
+  private strobePeriod = -1
   /** Average frame time (ms). */
   frameMs = 16.7
   /** Glyphs morphed on the last frame. */
@@ -102,6 +127,7 @@ export class AcidEngine {
         s.fontSize,
         s.lineHeight,
         s.tracking,
+        s.anchorDensity,
         width,
         height,
       ])
@@ -116,22 +142,49 @@ export class AcidEngine {
       layoutChanged = true
     }
 
+    mask.riseColorMs = s.seepMs
+    mask.riseMorphMs = s.seepMs + s.morphLag
     this.moveBrush(now, dt, s, mask)
     mask.step(dt, s.mode === 'hold' ? 'hold' : 'fade', s.decayMs, s.fadeEase)
 
     const shaping: MorphShaping = { band: s.band, maxMorph: s.maxMorph, morphEase: s.morphEase }
-    const shapingKey = JSON.stringify([shaping, s.perGlyph])
+    const shapingKey = JSON.stringify([shaping, s.perGlyph, s.strobe, s.strobeAmount])
     if (shapingKey !== this.shapingKey) {
       this.shapingKey = shapingKey
       for (const g of this.glyphs) g.stale = true
     }
-    const dirty = mask.takeDirty()
-    const tAt = (x: number, y: number) => morphAmount(mask.sample(mask.morph, x, y), shaping)
+    let dirty = mask.takeDirty()
+
+    // Spread: the channels blurred wide under themselves; recomputed when the mask or the spread changes.
+    const spreadKey = JSON.stringify([s.spread, s.morphSpread, s.radius, mask.cols, mask.rows])
+    const maskChanged = mask.version !== this.maskVersion || spreadKey !== this.spreadKey
+    if (maskChanged) {
+      if (spreadKey !== this.spreadKey) {
+        this.spreadKey = spreadKey
+        for (const g of this.glyphs) g.stale = true
+      }
+      this.fieldM = this.spreadChannel(mask, mask.morph, this.fieldM, s.morphSpread, s.radius)
+      this.fieldC = this.spreadChannel(mask, mask.color, this.fieldC, s.spread, s.radius)
+    }
+    const fieldM = this.fieldM ?? mask.morph
+    const fieldC = this.fieldC ?? mask.color
+    if (dirty && s.morphSpread > 0) {
+      const pad = s.morphSpread * SPREAD_RADII * s.radius * height
+      dirty = { x0: dirty.x0 - pad, y0: dirty.y0 - pad, x1: dirty.x1 + pad, y1: dirty.y1 + pad }
+    }
+
+    // Strobe: each hold period every letter under the brush jumps to its own shape.
+    const period = s.strobe ? Math.floor((now - this.start) / Math.max(16, s.strobeHoldMs)) : -1
+    const strobeTick = period !== this.strobePeriod
+    this.strobePeriod = period
+    const tBase = (x: number, y: number) => morphAmount(mask.sample(fieldM, x, y), shaping)
     let changed = layoutChanged ? 1 : 0
     this.morphed = 0
-    for (const g of this.glyphs) {
-      if (g.stale || (dirty && intersects(g.box, dirty))) {
+    for (let gi = 0; gi < this.glyphs.length; gi++) {
+      const g = this.glyphs[gi]
+      if (g.stale || (dirty && intersects(g.box, dirty)) || (strobeTick && g.maxT > 0)) {
         const before = g.maxT
+        const tAt = s.strobe ? (x: number, y: number) => strobeT(tBase(x, y), s.strobeAmount, gi, period) : tBase
         morphGlyph(g, tAt, s.perGlyph)
         // A glyph that was and is still all A needs no new vertices.
         if (before !== 0 || g.maxT !== 0) changed++
@@ -139,11 +192,28 @@ export class AcidEngine {
       }
     }
     if (changed) this.uploadGlyphs()
-    if (mask.version !== this.maskVersion) {
+    if (maskChanged) {
       this.maskVersion = mask.version
-      this.renderer.uploadMask(mask.morph, mask.color)
+      this.renderer.uploadMask(fieldM, fieldC)
     }
     this.renderer.render({ ...s, bleed: s.bleed, time: (now - this.start) / 1000 })
+  }
+
+  /** `src` spread by `amount` (0 none: null, the mask's own channel is used), into `out` when it fits. */
+  private spreadChannel(
+    mask: MaskField,
+    src: Float32Array,
+    out: Float32Array | null,
+    amount: number,
+    radius: number,
+  ): Float32Array | null {
+    if (!(amount > 0)) return null
+    const n = src.length
+    if (!out || out.length !== n) out = new Float32Array(n)
+    if (!this.spreadTmp || this.spreadTmp.length !== n) this.spreadTmp = new Float32Array(n)
+    const cells = (amount * SPREAD_RADII * radius * this.height) / mask.cell
+    spreadField(src, out, this.spreadTmp, mask.cols, mask.rows, cells)
+    return out
   }
 
   private moveBrush(now: number, dt: number, s: Settings, mask: MaskField): void {
@@ -181,6 +251,8 @@ export class AcidEngine {
       strength: s.strength,
       edgeNoise: s.edgeNoise,
       colorExtra: s.colorExtra,
+      shapeWarp: s.shapeWarp,
+      density: s.density,
     }
     if (this.brushPrev) mask.stroke(this.brushPrev.x, this.brushPrev.y, at.x, at.y, stamp)
     else mask.stamp(at.x, at.y, stamp)

@@ -1,6 +1,7 @@
 // The brush mask: a low-resolution grid over the canvas with two channels, both 0–1. `morph` sets how far each anchor
 // goes from A to B; `color` how much acid colour (it reaches colorExtra further). Hold keeps every stroke until Clear;
-// decay and follow fade each cell from the last value it was stamped to along the fade curve. Pure: no DOM.
+// decay and follow fade each cell from the last value it was stamped to along the fade curve. With a rise time a cell
+// seeps up to the value it was stamped to instead of jumping there (morph and colour each with their own). Pure: no DOM.
 
 import { brushFalloff, brushReach, valueNoise } from './brush'
 import { ease, type EaseName } from './easing'
@@ -12,6 +13,10 @@ export interface StampParams {
   strength: number
   edgeNoise: number
   colorExtra: number
+  /** 0–1: the stamp's outline pushed about by broad noise, so a big brush is not a circle. */
+  shapeWarp?: number
+  /** 0–1: patches inside the stamp weaker than others. */
+  density?: number
 }
 
 export interface Rect {
@@ -32,9 +37,17 @@ export class MaskField {
   readonly color: Float32Array
   private readonly peakM: Float32Array
   private readonly peakC: Float32Array
+  /** Where each cell is heading now (the peak as it fades); morph and color rise towards it. */
+  private readonly goalM: Float32Array
+  private readonly goalC: Float32Array
   private readonly age: Float32Array
+  /** Rise times (ms): 0 jumps to the stamped value. */
+  riseMorphMs = 0
+  riseColorMs = 0
   /** Cells that may be above 0 (inclusive cell bounds), or null when all are 0. */
   private active: Rect | null = null
+  /** Cells stamped since the last clear (inclusive cell bounds), or null. */
+  private touched: Rect | null = null
   /** Canvas pixels that changed since takeDirty(). */
   private dirty: Rect | null = null
   /** Bumped on every change. */
@@ -49,24 +62,33 @@ export class MaskField {
     this.color = new Float32Array(n)
     this.peakM = new Float32Array(n)
     this.peakC = new Float32Array(n)
+    this.goalM = new Float32Array(n)
+    this.goalC = new Float32Array(n)
     this.age = new Float32Array(n)
   }
 
   clear(): void {
-    if (this.active) this.markCells(this.active)
+    if (this.touched) this.markCells(this.touched)
     this.morph.fill(0)
     this.color.fill(0)
     this.peakM.fill(0)
     this.peakC.fill(0)
+    this.goalM.fill(0)
+    this.goalC.fill(0)
     this.age.fill(0)
     this.active = null
+    this.touched = null
     this.version++
   }
 
   /** One dab of the brush at canvas point (x, y); each cell keeps the higher of its value and the dab's. */
   stamp(x: number, y: number, p: StampParams): void {
     if (!(p.radius > 0) || !(p.strength > 0)) return
-    const reach = p.radius * (1 + Math.max(0, p.colorExtra)) * brushReach(p.hardness) * (1 + 0.5 * p.edgeNoise)
+    const shapeWarp = p.shapeWarp ?? 0
+    const density = p.density ?? 0
+    const reach =
+      p.radius * (1 + Math.max(0, p.colorExtra)) * brushReach(p.hardness) * (1 + 0.5 * p.edgeNoise) +
+      shapeWarp * p.radius * 0.6
     const c = this.cell
     const i0 = Math.max(0, Math.floor((x - reach) / c))
     const i1 = Math.min(this.cols - 1, Math.floor((x + reach) / c))
@@ -75,11 +97,20 @@ export class MaskField {
     if (i0 > i1 || j0 > j1) return
     const colorRadius = p.radius * (1 + Math.max(0, p.colorExtra))
     const noiseScale = 1 / Math.max(1e-6, p.radius * 0.55)
+    const broad = 1 / Math.max(1e-6, p.radius * 1.6)
+    const rise = this.riseMorphMs > 0 || this.riseColorMs > 0
     for (let j = j0; j <= j1; j++) {
       const py = (j + 0.5) * c
       for (let i = i0; i <= i1; i++) {
         const px = (i + 0.5) * c
-        const d = Math.hypot(px - x, py - y)
+        let d: number
+        if (shapeWarp > 0) {
+          // The cell seen from a point pushed about by broad noise fixed to the canvas: the outline stretches out in
+          // some directions and pulls in in others, and overlapping dabs agree.
+          const wx = valueNoise(px * broad + 41, py * broad) - 0.5
+          const wy = valueNoise(px * broad, py * broad + 73) - 0.5
+          d = Math.hypot(px + wx * shapeWarp * p.radius * 1.2 - x, py + wy * shapeWarp * p.radius * 1.2 - y)
+        } else d = Math.hypot(px - x, py - y)
         // An uneven edge: the distance stretched or shrunk by noise fixed to the canvas, so overlapping dabs agree.
         let warp = 1
         if (p.edgeNoise > 0) {
@@ -88,20 +119,28 @@ export class MaskField {
             0.35 * valueNoise(px * noiseScale * 2.7 + 17, py * noiseScale * 2.7)
           warp = 1 + p.edgeNoise * 0.7 * (n - 0.5)
         }
-        const m = brushFalloff((d * warp) / p.radius, p.hardness) * p.strength
-        const col = brushFalloff((d * warp) / colorRadius, p.hardness) * p.strength
+        // Heavier and lighter patches.
+        const weight =
+          density > 0
+            ? p.strength * (1 - density * smoothstepNoise(valueNoise(px * noiseScale * 0.7 - 9, py * noiseScale * 0.7)))
+            : p.strength
+        const m = brushFalloff((d * warp) / p.radius, p.hardness) * weight
+        const col = brushFalloff((d * warp) / colorRadius, p.hardness) * weight
         const k = j * this.cols + i
-        if (m > this.morph[k] || col > this.color[k]) {
-          this.peakM[k] = Math.max(this.morph[k], m)
-          this.peakC[k] = Math.max(this.color[k], col)
-          this.morph[k] = this.peakM[k]
-          this.color[k] = this.peakC[k]
+        if (m > this.goalM[k] || col > this.goalC[k]) {
+          this.peakM[k] = this.goalM[k] = Math.max(this.goalM[k], m)
+          this.peakC[k] = this.goalC[k] = Math.max(this.goalC[k], col)
+          if (!rise) {
+            this.morph[k] = this.peakM[k]
+            this.color[k] = this.peakC[k]
+          }
           this.age[k] = 0
         }
       }
     }
     const cells = { x0: i0, y0: j0, x1: i1, y1: j1 }
     this.active = union(this.active, cells)
+    this.touched = union(this.touched, cells)
     this.markCells(cells)
     this.version++
   }
@@ -112,36 +151,65 @@ export class MaskField {
     for (let s = 1; s <= steps; s++) this.stamp(x0 + ((x1 - x0) * s) / steps, y0 + ((y1 - y0) * s) / steps, p)
   }
 
-  /** Moves time on by `dtMs`: in 'fade' every stamped cell falls from its peak to 0 over `decayMs` along `curve`. */
+  /**
+   * Moves time on by `dtMs`: cells rise towards their stamped value over the rise times, and in 'fade' every stamped
+   * cell falls from its peak to 0 over `decayMs` along `curve` (after it has risen).
+   */
   step(dtMs: number, mode: FadeMode, decayMs: number, curve: EaseName): void {
-    if (mode === 'hold' || !this.active || !(dtMs > 0)) return
+    const riseM = this.riseMorphMs
+    const riseC = this.riseColorMs
+    if ((mode === 'hold' && !(riseM > 0) && !(riseC > 0)) || !this.active || !(dtMs > 0)) return
     const a = this.active
-    this.markCells(a)
     let nx0 = Infinity
     let ny0 = Infinity
     let nx1 = -1
     let ny1 = -1
+    let cx0 = Infinity
+    let cy0 = Infinity
+    let cx1 = -1
+    let cy1 = -1
     const span = Math.max(1, decayMs)
+    const delay = Math.max(riseM, riseC)
     for (let j = a.y0; j <= a.y1; j++) {
       for (let i = a.x0; i <= a.x1; i++) {
         const k = j * this.cols + i
         if (this.peakM[k] <= 0 && this.peakC[k] <= 0) continue
         const age = (this.age[k] += dtMs)
-        if (age >= span) {
-          this.peakM[k] = this.peakC[k] = this.morph[k] = this.color[k] = 0
-          continue
+        const m0 = this.morph[k]
+        const c0 = this.color[k]
+        let keep = 1
+        if (mode === 'fade') {
+          const fadeAge = age - delay
+          keep = fadeAge <= 0 ? 1 : fadeAge >= span ? 0 : 1 - ease(curve, fadeAge / span)
         }
-        const keep = 1 - ease(curve, age / span)
-        this.morph[k] = this.peakM[k] * keep
-        this.color[k] = this.peakC[k] * keep
-        if (i < nx0) nx0 = i
-        if (i > nx1) nx1 = i
-        if (j < ny0) ny0 = j
-        ny1 = j
+        if (keep <= 0) {
+          this.peakM[k] = this.peakC[k] = this.goalM[k] = this.goalC[k] = this.morph[k] = this.color[k] = 0
+        } else {
+          const gm = (this.goalM[k] = this.peakM[k] * keep)
+          const gc = (this.goalC[k] = this.peakC[k] * keep)
+          this.morph[k] = riseM > 0 && m0 < gm ? Math.min(gm, m0 + (this.peakM[k] * dtMs) / riseM) : gm
+          this.color[k] = riseC > 0 && c0 < gc ? Math.min(gc, c0 + (this.peakC[k] * dtMs) / riseC) : gc
+        }
+        if (this.morph[k] !== m0 || this.color[k] !== c0) {
+          if (i < cx0) cx0 = i
+          if (i > cx1) cx1 = i
+          if (j < cy0) cy0 = j
+          cy1 = j
+        }
+        // Hold keeps a cell for good once it has risen; fade keeps it until it is gone.
+        if (keep > 0 && (mode === 'fade' || this.morph[k] < this.goalM[k] || this.color[k] < this.goalC[k])) {
+          if (i < nx0) nx0 = i
+          if (i > nx1) nx1 = i
+          if (j < ny0) ny0 = j
+          ny1 = j
+        }
       }
     }
     this.active = nx1 >= 0 ? { x0: nx0, y0: ny0, x1: nx1, y1: ny1 } : null
-    this.version++
+    if (cx1 >= 0) {
+      this.markCells({ x0: cx0, y0: cy0, x1: cx1, y1: cy1 })
+      this.version++
+    }
   }
 
   /** A channel at canvas point (x, y), bilinear between cell centres. */
@@ -172,6 +240,12 @@ export class MaskField {
     const c = this.cell
     this.dirty = union(this.dirty, { x0: (r.x0 - 1) * c, y0: (r.y0 - 1) * c, x1: (r.x1 + 2) * c, y1: (r.y1 + 2) * c })
   }
+}
+
+/** Noise pushed towards 0 and 1, so patches read as patches. */
+function smoothstepNoise(n: number): number {
+  const t = Math.min(1, Math.max(0, (n - 0.3) / 0.4))
+  return t * t * (3 - 2 * t)
 }
 
 function union(a: Rect | null, b: Rect): Rect {
