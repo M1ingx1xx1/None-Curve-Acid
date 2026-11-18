@@ -28,10 +28,22 @@ export function ease(name: EaseName, t: number): number {
   if (!(t > 0)) return 0
   if (t >= 1) return 1
   if (name === 'linear') return t
-  const m = /^(quad|cubic|quart|quint)(In|Out|InOut)$/.exec(name)
-  if (!m) return t
-  const n = POWERS[m[1] as EasePower]
-  if (m[2] === 'In') return t ** n
-  if (m[2] === 'Out') return 1 - (1 - t) ** n
+  const c = curveOf(name)
+  if (!c) return t
+  const n = c.power
+  if (c.dir === 'In') return t ** n
+  if (c.dir === 'Out') return 1 - (1 - t) ** n
   return t < 0.5 ? 2 ** (n - 1) * t ** n : 1 - (-2 * t + 2) ** n / 2
+}
+
+// ease() runs per mask cell and per anchor every frame: the name is parsed once, not on every call.
+const parsed = new Map<string, { power: number; dir: string } | null>()
+function curveOf(name: string): { power: number; dir: string } | null {
+  let c = parsed.get(name)
+  if (c === undefined) {
+    const m = /^(quad|cubic|quart|quint)(In|Out|InOut)$/.exec(name)
+    c = m ? { power: POWERS[m[1] as EasePower], dir: m[2] } : null
+    parsed.set(name, c)
+  }
+  return c
 }

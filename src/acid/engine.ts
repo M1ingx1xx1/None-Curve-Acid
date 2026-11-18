@@ -9,7 +9,7 @@ import { intersects, MaskField, type StampParams } from './mask'
 import { Spring2, sweepPath, type Point2 } from './motion'
 import { AcidRenderer } from './renderer'
 import { layoutScene, morphGlyph, type PlacedGlyph } from './scene'
-import { spreadField } from './spread'
+import { Spread } from './spread'
 
 /** Without pointer moves for this long (ms), the auto brush takes over again. */
 export const AUTO_HANDBACK_MS = 1500
@@ -27,7 +27,8 @@ function hash01(a: number, b: number): number {
 
 /** The strobe's t for a glyph: `t` pushed up or down by up to `amount` of the way, fixed for one hold period. */
 export function strobeT(t: number, amount: number, glyph: number, period: number): number {
-  if (!(t > 0)) return t
+  // Only letters the brush has reached: not ones a blur's rounding left a trace of t on.
+  if (!(t > 1e-4)) return t
   const r = hash01(glyph, period) * 2 - 1
   return Math.min(1, Math.max(0, r > 0 ? t + r * amount * (1 - t) : t + r * amount * t))
 }
@@ -58,7 +59,8 @@ export class AcidEngine {
   /** The mask's channels after Spread (the mask's own arrays when there is none). */
   private fieldM: Float32Array | null = null
   private fieldC: Float32Array | null = null
-  private spreadTmp: Float32Array | null = null
+  private spreadM: Spread | null = null
+  private spreadC: Spread | null = null
   private spreadKey = ''
   private strobePeriod = -1
   /** Average frame time (ms). */
@@ -163,8 +165,10 @@ export class AcidEngine {
         this.spreadKey = spreadKey
         for (const g of this.glyphs) g.stale = true
       }
-      this.fieldM = this.spreadChannel(mask, mask.morph, this.fieldM, s.morphSpread, s.radius)
-      this.fieldC = this.spreadChannel(mask, mask.color, this.fieldC, s.spread, s.radius)
+      this.spreadM = s.morphSpread > 0 ? this.spreadFor(this.spreadM, mask) : null
+      this.spreadC = s.spread > 0 ? this.spreadFor(this.spreadC, mask) : null
+      this.fieldM = this.spreadM && this.spreadChannel(this.spreadM, mask, mask.morph, s.morphSpread, s.radius)
+      this.fieldC = this.spreadC && this.spreadChannel(this.spreadC, mask, mask.color, s.spread, s.radius)
     }
     const fieldM = this.fieldM ?? mask.morph
     const fieldC = this.fieldC ?? mask.color
@@ -199,21 +203,15 @@ export class AcidEngine {
     this.renderer.render({ ...s, bleed: s.bleed, time: (now - this.start) / 1000 })
   }
 
-  /** `src` spread by `amount` (0 none: null, the mask's own channel is used), into `out` when it fits. */
-  private spreadChannel(
-    mask: MaskField,
-    src: Float32Array,
-    out: Float32Array | null,
-    amount: number,
-    radius: number,
-  ): Float32Array | null {
-    if (!(amount > 0)) return null
-    const n = src.length
-    if (!out || out.length !== n) out = new Float32Array(n)
-    if (!this.spreadTmp || this.spreadTmp.length !== n) this.spreadTmp = new Float32Array(n)
+  /** `spread` when it fits the mask, else a new one. */
+  private spreadFor(spread: Spread | null, mask: MaskField): Spread {
+    return spread && spread.out.length === mask.cols * mask.rows ? spread : new Spread(mask.cols * mask.rows)
+  }
+
+  /** `src` spread by `amount` of SPREAD_RADII brush radii. */
+  private spreadChannel(spread: Spread, mask: MaskField, src: Float32Array, amount: number, radius: number) {
     const cells = (amount * SPREAD_RADII * radius * this.height) / mask.cell
-    spreadField(src, out, this.spreadTmp, mask.cols, mask.rows, cells)
-    return out
+    return spread.run(src, mask.cols, mask.rows, cells, mask.extent)
   }
 
   private moveBrush(now: number, dt: number, s: Settings, mask: MaskField): void {

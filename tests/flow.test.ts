@@ -34,6 +34,19 @@ describe('seep in', () => {
   })
 })
 
+describe('mode switch', () => {
+  it('a spot that rose under Hold fades once the mode turns to fading', () => {
+    const mask = new MaskField(400, 400, 4)
+    mask.riseColorMs = mask.riseMorphMs = 100
+    mask.stamp(200, 200, brush)
+    for (let i = 0; i < 3; i++) mask.step(100, 'hold', 1000, 'linear')
+    expect(mask.sample(mask.morph, 200, 200)).toBe(1)
+    for (let i = 0; i < 12; i++) mask.step(100, 'fade', 1000, 'linear')
+    expect(mask.sample(mask.morph, 200, 200)).toBe(0)
+    expect(mask.extent).toBeNull()
+  })
+})
+
 describe('shape warp and density', () => {
   it('stay within 0–1 and change the outline', () => {
     const plain = new MaskField(400, 400, 4)

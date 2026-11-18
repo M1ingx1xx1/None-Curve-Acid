@@ -99,34 +99,51 @@ export class MaskField {
     const noiseScale = 1 / Math.max(1e-6, p.radius * 0.55)
     const broad = 1 / Math.max(1e-6, p.radius * 1.6)
     const rise = this.riseMorphMs > 0 || this.riseColorMs > 0
+    const noise = this.noiseFor(p.radius)
+    // Cells the dab cannot raise are skipped before the noise: those already at full strength, and those beyond the
+    // furthest the warped, noisy edge can reach (colour reaches further than morph).
+    const cut = colorRadius * brushReach(p.hardness) * (1 + 1e-9) + 1e-6
+    const shiftMax = 0.85 * shapeWarp * p.radius
+    const warpMin = 1 - 0.35 * Math.max(0, p.edgeNoise)
     for (let j = j0; j <= j1; j++) {
       const py = (j + 0.5) * c
       for (let i = i0; i <= i1; i++) {
+        const k = j * this.cols + i
+        if (this.goalM[k] >= p.strength && this.goalC[k] >= p.strength) continue
         const px = (i + 0.5) * c
+        if (warpMin > 0 && (Math.sqrt((px - x) ** 2 + (py - y) ** 2) - shiftMax) * warpMin > cut) continue
         let d: number
         if (shapeWarp > 0) {
           // The cell seen from a point pushed about by broad noise fixed to the canvas: the outline stretches out in
           // some directions and pulls in in others, and overlapping dabs agree.
-          const wx = valueNoise(px * broad + 41, py * broad) - 0.5
-          const wy = valueNoise(px * broad, py * broad + 73) - 0.5
+          let wx = noise.wx[k]
+          if (wx !== wx) {
+            wx = noise.wx[k] = valueNoise(px * broad + 41, py * broad) - 0.5
+            noise.wy[k] = valueNoise(px * broad, py * broad + 73) - 0.5
+          }
+          const wy = noise.wy[k]
           d = Math.hypot(px + wx * shapeWarp * p.radius * 1.2 - x, py + wy * shapeWarp * p.radius * 1.2 - y)
         } else d = Math.hypot(px - x, py - y)
         // An uneven edge: the distance stretched or shrunk by noise fixed to the canvas, so overlapping dabs agree.
         let warp = 1
         if (p.edgeNoise > 0) {
-          const n =
-            0.65 * valueNoise(px * noiseScale, py * noiseScale) +
-            0.35 * valueNoise(px * noiseScale * 2.7 + 17, py * noiseScale * 2.7)
+          let n = noise.edge[k]
+          if (n !== n)
+            n = noise.edge[k] =
+              0.65 * valueNoise(px * noiseScale, py * noiseScale) +
+              0.35 * valueNoise(px * noiseScale * 2.7 + 17, py * noiseScale * 2.7)
           warp = 1 + p.edgeNoise * 0.7 * (n - 0.5)
         }
         // Heavier and lighter patches.
-        const weight =
-          density > 0
-            ? p.strength * (1 - density * smoothstepNoise(valueNoise(px * noiseScale * 0.7 - 9, py * noiseScale * 0.7)))
-            : p.strength
+        let weight = p.strength
+        if (density > 0) {
+          let patch = noise.patch[k]
+          if (patch !== patch)
+            patch = noise.patch[k] = smoothstepNoise(valueNoise(px * noiseScale * 0.7 - 9, py * noiseScale * 0.7))
+          weight = p.strength * (1 - density * patch)
+        }
         const m = brushFalloff((d * warp) / p.radius, p.hardness) * weight
         const col = brushFalloff((d * warp) / colorRadius, p.hardness) * weight
-        const k = j * this.cols + i
         if (m > this.goalM[k] || col > this.goalC[k]) {
           this.peakM[k] = this.goalM[k] = Math.max(this.goalM[k], m)
           this.peakC[k] = this.goalC[k] = Math.max(this.goalC[k], col)
@@ -158,8 +175,10 @@ export class MaskField {
   step(dtMs: number, mode: FadeMode, decayMs: number, curve: EaseName): void {
     const riseM = this.riseMorphMs
     const riseC = this.riseColorMs
-    if ((mode === 'hold' && !(riseM > 0) && !(riseC > 0)) || !this.active || !(dtMs > 0)) return
-    const a = this.active
+    if (mode === 'hold' && !(riseM > 0) && !(riseC > 0)) return
+    if (!(this.active || (mode === 'fade' && this.touched)) || !(dtMs > 0)) return
+    // Fading covers every stamped cell, also those a hold with a rise time let go of once they had risen.
+    const a = (mode === 'fade' && this.touched ? this.touched : this.active)!
     let nx0 = Infinity
     let ny0 = Infinity
     let nx1 = -1
@@ -206,10 +225,37 @@ export class MaskField {
       }
     }
     this.active = nx1 >= 0 ? { x0: nx0, y0: ny0, x1: nx1, y1: ny1 } : null
+    // When fading, every cell above 0 is active.
+    if (mode === 'fade') this.touched = this.active && { ...this.active }
     if (cx1 >= 0) {
       this.markCells({ x0: cx0, y0: cy0, x1: cx1, y1: cy1 })
       this.version++
     }
+  }
+
+  /**
+   * The noise a stamp of `radius` reads at each cell (fixed to the canvas, so the same for every dab), worked out the
+   * first time a dab reaches the cell; NaN until then.
+   */
+  private noiseFor(radius: number) {
+    if (!this.noise || this.noise.radius !== radius) {
+      const n = this.cols * this.rows
+      const fresh = () => new Float64Array(n).fill(NaN)
+      this.noise = { radius, wx: fresh(), wy: fresh(), edge: fresh(), patch: fresh() }
+    }
+    return this.noise
+  }
+  private noise: {
+    radius: number
+    wx: Float64Array
+    wy: Float64Array
+    edge: Float64Array
+    patch: Float64Array
+  } | null = null
+
+  /** Cells that may be above 0 (inclusive cell bounds), or null when all are 0. */
+  get extent(): Rect | null {
+    return this.touched
   }
 
   /** A channel at canvas point (x, y), bilinear between cell centres. */
