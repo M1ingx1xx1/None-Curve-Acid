@@ -53,14 +53,17 @@ function readChoice(value: unknown): FontChoice | null {
   return null
 }
 
-export function loadFontChoices(): { a: FontChoice | null; b: FontChoice | null } {
+/**
+ * The saved font choices: A, B1 (saved as `b`, its name from before there were two targets) and B2 (null: none).
+ */
+export function loadFontChoices(): { a: FontChoice | null; b: FontChoice | null; b2: FontChoice | null } {
   const v = read(FONTS_KEY) as Record<string, unknown> | null
-  return { a: readChoice(v?.a), b: readChoice(v?.b) }
+  return { a: readChoice(v?.a), b: readChoice(v?.b), b2: readChoice(v?.b2) }
 }
 
-export function saveFontChoices(a: FontSource | undefined, b: FontSource | undefined): void {
+export function saveFontChoices(a: FontSource | undefined, b: FontSource | undefined, b2?: FontSource): void {
   const keep = (s: FontSource | undefined) => (s && s.kind !== 'local' ? s : null)
-  write(FONTS_KEY, { a: keep(a), b: keep(b) })
+  write(FONTS_KEY, { a: keep(a), b: keep(b), b2: keep(b2) })
 }
 
 export function settingsFile(settings: Settings): string {

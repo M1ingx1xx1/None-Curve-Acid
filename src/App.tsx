@@ -8,6 +8,7 @@ import Icon from './components/Icon'
 import { ColorField, EaseSelect, percent, Section, Segmented, Slider, Toggle } from './components/controls'
 import StopsEditor from './components/StopsEditor'
 import { downloadFile, safeFileName } from './export/download'
+import { ticksDue, tickTime } from './export/clock'
 import type { LiveRecorder } from './export/videoEncode'
 import { toFontLoadError } from './font/errors'
 import { History } from './state/history'
@@ -25,21 +26,24 @@ import {
 import {
   canvasSize,
   DEFAULT_SETTINGS,
+  FPS_CHOICES,
   OUTPUT_HEIGHTS,
   RANGES,
   sanitize,
   TEXT_LIMIT,
+  type Fps,
   type Settings,
 } from './state/settings'
 
-type Slot = 'a' | 'b'
+/** A: the base font; b: target B1; b2: the optional second target. */
+type Slot = 'a' | 'b' | 'b2'
 type RecordState =
   | { kind: 'idle'; message?: string; tone?: 'info' | 'error' }
   | { kind: 'starting' }
   | { kind: 'recording'; startedAt: number }
   | { kind: 'saving' }
 
-const DEFAULT_FONTS: Record<Slot, FontChoice> = {
+const DEFAULT_FONTS: Record<'a' | 'b', FontChoice> = {
   a: { kind: 'builtin', file: 'Roboto.ttf' },
   b: { kind: 'builtin', file: 'Space-Test.otf' },
 }
@@ -73,6 +77,7 @@ export default function App() {
     return {
       a: { kind: 'loading', label: choiceLabel(saved.a ?? DEFAULT_FONTS.a) },
       b: { kind: 'loading', label: choiceLabel(saved.b ?? DEFAULT_FONTS.b) },
+      b2: saved.b2 ? { kind: 'loading', label: choiceLabel(saved.b2) } : { kind: 'empty' },
     }
   })
   const [google, setGoogle] = useState<Slot | null>(null)
@@ -91,7 +96,7 @@ export default function App() {
   settingsRef.current = settings
   const fontsRef = useRef(fonts)
   fontsRef.current = fonts
-  const recorderRef = useRef<{ rec: LiveRecorder; startedAt: number; opaque: boolean } | null>(null)
+  const recorderRef = useRef<{ rec: LiveRecorder; startedAt: number; opaque: boolean; fps: number } | null>(null)
   const [glError, setGlError] = useState<string | null>(null)
 
   const set = useCallback(<K extends keyof Settings>(key: K, value: Settings[K]) => {
@@ -128,7 +133,14 @@ export default function App() {
   }, [])
 
   // Font loading.
-  const loads = useRef<Record<Slot, AbortController | null>>({ a: null, b: null })
+  const loads = useRef<Record<Slot, AbortController | null>>({ a: null, b: null, b2: null })
+  const saveFonts = (f: Record<Slot, SlotState>) => {
+    // A slot still loading (or failed) keeps the choice saved before, so a reload mid-load does not lose it.
+    const saved = loadFontChoices()
+    const src = (s: SlotState, before: FontChoice | null) =>
+      s.kind === 'ready' ? s.font.source : s.kind === 'empty' ? undefined : (before ?? undefined)
+    saveFontChoices(src(f.a, saved.a), src(f.b, saved.b), src(f.b2, saved.b2))
+  }
   const loadFont = useCallback((slot: Slot, label: string, load: (signal: AbortSignal) => Promise<LoadedFont>) => {
     loads.current[slot]?.abort()
     const controller = new AbortController()
@@ -139,8 +151,7 @@ export default function App() {
         if (controller.signal.aborted) return
         setFonts((f) => {
           const next = { ...f, [slot]: { kind: 'ready', font } as SlotState }
-          const src = (s: SlotState) => (s.kind === 'ready' ? s.font.source : undefined)
-          saveFontChoices(src(next.a), src(next.b))
+          saveFonts(next)
           return next
         })
       },
@@ -150,6 +161,15 @@ export default function App() {
       },
     )
   }, [])
+  const removeFont = (slot: Slot) => {
+    loads.current[slot]?.abort()
+    loads.current[slot] = null
+    setFonts((f) => {
+      const next = { ...f, [slot]: { kind: 'empty' } as SlotState }
+      saveFonts(next)
+      return next
+    })
+  }
   const loadChoice = useCallback(
     (slot: Slot, c: FontChoice) =>
       c.kind === 'builtin'
@@ -161,6 +181,7 @@ export default function App() {
     const saved = loadFontChoices()
     loadChoice('a', saved.a ?? DEFAULT_FONTS.a)
     loadChoice('b', saved.b ?? DEFAULT_FONTS.b)
+    if (saved.b2) loadChoice('b2', saved.b2)
   }, [loadChoice])
 
   // The engine and its frame loop.
@@ -186,8 +207,22 @@ export default function App() {
       const rec = recorderRef.current
       // An MP4 cannot be transparent: while one records, the background is painted.
       const look = rec?.opaque && s.transparent ? { ...s, transparent: false } : s
-      engine.frame(now, look, f.a.kind === 'ready' ? f.a.font : null, f.b.kind === 'ready' ? f.b.font : null)
-      if (rec) rec.rec.frame(now - rec.startedAt)
+      const fontA = f.a.kind === 'ready' ? f.a.font : null
+      // Targets: B1 and B2, whichever are loaded (B1 first).
+      // B1 is required: without it (loading or failed) nothing morphs, even when B2 is there.
+      const targets = f.b.kind === 'ready' ? [f.b, f.b2].flatMap((t) => (t.kind === 'ready' ? [t.font] : [])) : []
+      if (rec) {
+        // Recording: one frame drawn for every tick of the take, at that tick's time, each captured on its own.
+        engine.fixedClock = true
+        const due = ticksDue(now - rec.startedAt, rec.rec.ticks, rec.fps)
+        for (let i = 0; i < due && !rec.rec.busy; i++) {
+          engine.frame(rec.startedAt + tickTime(rec.rec.ticks, rec.fps), look, fontA, targets)
+          rec.rec.capture()
+        }
+      } else {
+        engine.fixedClock = false
+        engine.frame(now, look, fontA, targets)
+      }
       frames.record(now, performance.now() - t0)
       if (now - lastStats > 250) {
         lastStats = now
@@ -230,7 +265,7 @@ export default function App() {
       const { LiveRecorder } = await import('./export/videoEncode')
       const rec = await LiveRecorder.start(canvas, settings.fps, alpha ? 'webm' : 'mp4', alpha)
       const startedAt = performance.now()
-      recorderRef.current = { rec, startedAt, opaque: !alpha }
+      recorderRef.current = { rec, startedAt, opaque: !alpha, fps: settings.fps }
       setElapsed(0)
       setRecord({ kind: 'recording', startedAt })
     } catch (error) {
@@ -244,14 +279,15 @@ export default function App() {
     const ms = performance.now() - current.startedAt
     setRecord({ kind: 'saving' })
     try {
-      const result = await current.rec.stop(ms)
+      const result = await current.rec.stop()
       const name = safeFileName(['none-curve-acid', new Date().toISOString().slice(0, 19)], result.format)
       downloadFile(result.blob, name, result.blob.type)
       const notes = [
         result.fellBack ? 'This browser cannot write MP4: saved as WebM.' : '',
         settings.transparent && result.format === 'webm' && keepAlpha ? 'Transparent background (WebM, VP9).' : '',
-        result.dropped > 0
-          ? `${result.dropped} of ${Math.round((result.durationMs * settings.fps) / 1000)} frames repeated (the page drew slower than ${settings.fps} fps).`
+        `${result.frames} frames at ${current.fps} fps, each drawn on its own.`,
+        result.durationMs < ms * 0.95
+          ? `The page drew slower than ${current.fps} fps, so the video's clock waited: it plays ${(result.durationMs / 1000).toFixed(2)} s of a ${(ms / 1000).toFixed(2)} s take, smoothly.`
           : '',
       ].filter(Boolean)
       setRecord({
@@ -277,9 +313,12 @@ export default function App() {
   const size = canvasSize(settings)
   const recording = record.kind === 'recording'
   const fontHint = (slot: Slot) =>
-    slot === 'b'
-      ? 'The shape the brush paints in: a TTF exported from None-Curve.'
-      : 'The text as it stands. The font None-Curve started from matches B best.'
+    slot === 'a'
+      ? 'The text as it stands. The font None-Curve started from matches B best.'
+      : slot === 'b'
+        ? 'The shape the brush paints in: a TTF exported from None-Curve.'
+        : 'Optional. With two targets each letter the brush reaches turns into B1 or B2, picked anew each time.'
+  const twoTargets = fonts.b.kind !== 'empty' && fonts.b2.kind !== 'empty'
 
   return (
     <div className="app" data-panel={panel ? 'open' : 'closed'}>
@@ -326,13 +365,32 @@ export default function App() {
                 onBuiltin={(file) => loadChoice('a', { kind: 'builtin', file })}
               />
               <FontSlot
-                title="B · NC font"
+                title="B1 · Target font"
                 hint={fontHint('b')}
                 state={fonts.b}
                 onFile={(file) => loadFont('b', file.name, () => loadLocalFont(file))}
                 onGoogle={() => setGoogle('b')}
                 onBuiltin={(file) => loadChoice('b', { kind: 'builtin', file })}
               />
+              <FontSlot
+                title="B2 · Target font"
+                hint={fontHint('b2')}
+                state={fonts.b2}
+                onFile={(file) => loadFont('b2', file.name, () => loadLocalFont(file))}
+                onGoogle={() => setGoogle('b2')}
+                onBuiltin={(file) => loadChoice('b2', { kind: 'builtin', file })}
+                onRemove={() => removeFont('b2')}
+              />
+              {twoTargets && (
+                <Slider
+                  label="B1 / B2"
+                  value={settings.b1Share}
+                  range={RANGES.b1Share}
+                  format={(v) => `${Math.round(v * 100)} / ${100 - Math.round(v * 100)}`}
+                  onChange={(v) => set('b1Share', v)}
+                  hint="The chance a letter turns into B1 rather than B2. A letter keeps its pick until it is back to A."
+                />
+              )}
             </Section>
 
             <Section title="Text">
@@ -560,6 +618,32 @@ export default function App() {
                 onChange={(v) => set('band', v)}
                 hint="100%: the shapes follow the brush falloff. Lower: A switches to B over a narrower band."
               />
+              <Toggle
+                label="Glitch"
+                checked={settings.glitch}
+                onChange={(v) => set('glitch', v)}
+                hint="In-between shapes stretch, shift, break and tear before they come back together, and stay longer; the brush leaves a trail."
+              />
+              {settings.glitch && (
+                <>
+                  <Slider
+                    label="Glitch amount"
+                    value={settings.glitchAmount}
+                    range={RANGES.glitchAmount}
+                    format={percent}
+                    onChange={(v) => set('glitchAmount', v)}
+                    hint="How far the in-between shapes stretch and tear, and how long they hold."
+                  />
+                  <Slider
+                    label="Trail"
+                    value={settings.glitchTrail}
+                    range={RANGES.glitchTrail}
+                    format={percent}
+                    onChange={(v) => set('glitchTrail', v)}
+                    hint="How long the shapes and colour linger after the brush has passed."
+                  />
+                </>
+              )}
               <Slider
                 label="Max morph"
                 value={settings.maxMorph}
@@ -603,9 +687,48 @@ export default function App() {
                 label="Strobe"
                 checked={settings.strobe}
                 onChange={(v) => set('strobe', v)}
-                hint="Letters under the brush jump between shapes."
+                hint="Shape: letters under the brush jump between shapes. Exposure flash: they flash like a camera strobe."
               />
               {settings.strobe && (
+                <Segmented
+                  label="Strobe mode"
+                  value={settings.strobeMode}
+                  onChange={(v) => set('strobeMode', v)}
+                  options={[
+                    { value: 'shape', label: 'Shape', title: 'Letters jump between shapes' },
+                    { value: 'flash', label: 'Exposure flash', title: 'Letters flash bright; shapes stay put' },
+                  ]}
+                />
+              )}
+              {settings.strobe && settings.strobeMode === 'flash' && (
+                <>
+                  <Slider
+                    label="Exposure"
+                    value={settings.flashExposure}
+                    range={RANGES.flashExposure}
+                    format={percent}
+                    onChange={(v) => set('flashExposure', v)}
+                    hint="How bright each flash goes; near 100% the letters briefly blow out to the light's colour."
+                  />
+                  <Slider
+                    label="Bloom"
+                    value={settings.flashBloom}
+                    range={RANGES.flashBloom}
+                    format={percent}
+                    onChange={(v) => set('flashBloom', v)}
+                    hint="How strongly and how far the light spills past the letters."
+                  />
+                  <Slider
+                    label="Flash rate"
+                    value={settings.flashRate}
+                    range={RANGES.flashRate}
+                    format={(v) => `${v.toFixed(1)} /s`}
+                    onChange={(v) => set('flashRate', v)}
+                  />
+                  <ColorField label="Light colour" value={settings.flashColor} onChange={(v) => set('flashColor', v)} />
+                </>
+              )}
+              {settings.strobe && settings.strobeMode === 'shape' && (
                 <>
                   <Slider
                     label="Strobe strength"
@@ -709,6 +832,39 @@ export default function App() {
                 onChange={(v) => set('spread', v)}
                 hint="The colour spreads past the brush and joins nearby strokes."
               />
+              <Toggle
+                label="Contour bleed"
+                checked={settings.contour}
+                onChange={(v) => set('contour', v)}
+                hint="The letters keep their ink in the middle; the gradient runs in from the outline and fades out past it."
+              />
+              {settings.contour && (
+                <>
+                  <Slider
+                    label="Bleed width"
+                    value={settings.contourWidth}
+                    range={RANGES.contourWidth}
+                    format={percent}
+                    onChange={(v) => set('contourWidth', v)}
+                    hint="How far the gradient reaches in from the outline: more gradient, less solid ink."
+                  />
+                  <Slider
+                    label="Gradient strength"
+                    value={settings.contourStrength}
+                    range={RANGES.contourStrength}
+                    format={percent}
+                    onChange={(v) => set('contourStrength', v)}
+                  />
+                  <Slider
+                    label="Edge softness"
+                    value={settings.contourSoft}
+                    range={RANGES.contourSoft}
+                    format={percent}
+                    onChange={(v) => set('contourSoft', v)}
+                    hint="How soft and wide the colour fades out past the outline."
+                  />
+                </>
+              )}
             </Section>
 
             <Section title="Canvas">
@@ -770,13 +926,13 @@ export default function App() {
             <Section title="Export">
               <Segmented
                 label="Video frame rate"
-                value={String(settings.fps) as '30' | '60'}
-                onChange={(v) => set('fps', Number(v) as 30 | 60)}
-                options={[
-                  { value: '30', label: '30 fps' },
-                  { value: '60', label: '60 fps' },
-                ]}
+                value={String(settings.fps) as `${Fps}`}
+                onChange={(v) => set('fps', Number(v) as Fps)}
+                options={FPS_CHOICES.map((f) => ({ value: `${f}` as const, label: `${f} fps` }))}
               />
+              <p className="field-hint">
+                Every frame of the video is drawn on its own at its own time, at any rate, so nothing is repeated.
+              </p>
               {settings.transparent && (
                 <>
                   <p className="panel-notice">
@@ -851,13 +1007,11 @@ export default function App() {
                   <dt>Late frames</dt>
                   <dd>{perf.late} in the last second</dd>
                   <dt>{settings.fps} fps video</dt>
-                  {/* The video takes a frame every 1000 / fps ms: a gap longer than that leaves a tick with none. */}
-                  <dd className={perf.worstMs <= (1000 / settings.fps) * 1.05 ? undefined : 'status-error'}>
-                    {perf.worstMs <= (1000 / settings.fps) * 1.05
+                  {/* A take draws a frame for every tick: settings.fps frames a second, each from its own draw. */}
+                  <dd className={perf.workAvgMs * settings.fps <= 800 ? undefined : 'status-error'}>
+                    {perf.workAvgMs * settings.fps <= 800
                       ? 'Keeps up'
-                      : perf.fps >= settings.fps
-                        ? 'Some frames repeat'
-                        : 'Too slow: frames repeat'}
+                      : 'Slow: a take runs behind the clock (the video stays smooth)'}
                   </dd>
                 </dl>
               ) : (

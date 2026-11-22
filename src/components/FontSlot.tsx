@@ -1,4 +1,4 @@
-// One font slot (A or B): what is loaded, and the three ways to change it (a file, Google Fonts, a built-in font).
+// One font slot (A, B1 or B2): what is loaded, and the three ways to change it (a file, Google Fonts, a built-in font).
 
 import { useId, useRef } from 'react'
 import { errorKindLabel, type FontLoadError } from '../font/errors'
@@ -6,7 +6,10 @@ import { BUILTIN_FONTS, type LoadedFont } from '../font/parse'
 import Icon from './Icon'
 
 export type SlotState =
-  { kind: 'loading'; label: string } | { kind: 'ready'; font: LoadedFont } | { kind: 'error'; error: FontLoadError }
+  | { kind: 'empty' }
+  | { kind: 'loading'; label: string }
+  | { kind: 'ready'; font: LoadedFont }
+  | { kind: 'error'; error: FontLoadError }
 
 interface FontSlotProps {
   title: string
@@ -15,9 +18,11 @@ interface FontSlotProps {
   onFile: (file: File) => void
   onGoogle: () => void
   onBuiltin: (file: string) => void
+  /** An optional slot: empties it. */
+  onRemove?: () => void
 }
 
-export default function FontSlot({ title, hint, state, onFile, onGoogle, onBuiltin }: FontSlotProps) {
+export default function FontSlot({ title, hint, state, onFile, onGoogle, onBuiltin, onRemove }: FontSlotProps) {
   const id = useId()
   const input = useRef<HTMLInputElement>(null)
   const builtin = state.kind === 'ready' && state.font.source.kind === 'builtin' ? state.font.source.file : ''
@@ -35,7 +40,13 @@ export default function FontSlot({ title, hint, state, onFile, onGoogle, onBuilt
         <span className="field-label">{title}</span>
         <span className="file-status" data-state={state.kind}>
           <span className="dot" aria-hidden="true" />
-          {state.kind === 'ready' ? state.font.label : state.kind === 'loading' ? `Loading ${state.label}…` : 'Error'}
+          {state.kind === 'ready'
+            ? state.font.label
+            : state.kind === 'loading'
+              ? `Loading ${state.label}…`
+              : state.kind === 'empty'
+                ? 'None'
+                : 'Error'}
         </span>
       </div>
       {state.kind === 'error' && (
@@ -77,6 +88,11 @@ export default function FontSlot({ title, hint, state, onFile, onGoogle, onBuilt
             </option>
           ))}
         </select>
+        {onRemove && state.kind !== 'empty' && (
+          <button type="button" className="button-small" onClick={onRemove}>
+            Remove
+          </button>
+        )}
       </div>
       <p className="field-hint">{hint}</p>
     </div>

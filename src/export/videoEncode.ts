@@ -1,9 +1,10 @@
 // Live recording of the canvas into MP4 or WebM with WebCodecs (Mediabunny). Adapted from None-Curve
 // src/export/videoEncode.ts (codec choice, MP4 → WebM fallback, VP9 with alpha for a transparent background,
-// bitrate from src/export/videoFormat.ts); the offline sound-driven render is left out. Frames are taken on a fixed
-// clock at the take's frame rate as the canvas draws: each sample is captured right after the frame it shows, stamped
-// with its tick, and lasts until the next sample, so the file is exactly as long as the take. When the encoder falls
-// behind, a tick is skipped and the sample before it lasts longer instead.
+// bitrate from src/export/videoFormat.ts); the offline sound-driven render is left out. The take runs on its own
+// clock at its frame rate: the page draws one frame for every tick (several per screen refresh at 90 fps, or one
+// every other refresh at 30), each at that tick's time, and each becomes its own sample lasting one tick. No frame is
+// ever repeated to fill a tick. When the encoder or the page falls behind, the take's clock waits for it (the video
+// stays exact, it just ends up shorter than the wall-clock time) and catches up a few ticks a refresh.
 
 import {
   BufferTarget,
@@ -26,8 +27,8 @@ export const VIDEO_MIMES: Record<VideoFormat, string> = { mp4: 'video/mp4', webm
 
 /** From None-Curve src/export/videoFormat.ts VIDEO_LIMITS. */
 const BITRATE = { bitsPerPixel: 4.5, referenceFps: 30, min: 2_000_000, max: 12_000_000 } as const
-/** Samples waiting for the encoder at most; more and the tick is skipped. */
-const MAX_QUEUE = 6
+/** Samples waiting for the encoder at most; more and the take's clock waits. */
+const MAX_QUEUE = 8
 
 /** Video bits per second for a frame size and rate (None-Curve videoFormat.ts videoBitrate). */
 export function videoBitrate(width: number, height: number, fps: number): number {
@@ -44,25 +45,13 @@ async function chooseFormat(format: VideoFormat, width: number, height: number) 
   return null
 }
 
-/**
- * The tick a sample captured `elapsedMs` into the take starts on: null when the clock has not reached `nextTick` yet.
- * The first sample starts the file (tick 0); later ones start on their own tick, and the sample before stretches to
- * meet them. Pure, for the tests.
- */
-export function nextSample(elapsedMs: number, nextTick: number, fps: number): { tick: number; after: number } | null {
-  const tick = Math.floor((elapsedMs * fps) / 1000)
-  if (tick < nextTick) return null
-  const start = nextTick === 0 ? 0 : tick
-  return { tick: start, after: tick + 1 }
-}
-
 export interface RecordResult {
   blob: Blob
   format: VideoFormat
   fellBack: boolean
   durationMs: number
-  /** Ticks that got no frame of their own (the one before was held longer). */
-  dropped: number
+  /** Frames in the file, each drawn on its own. */
+  frames: number
 }
 
 export class LiveRecorder {
@@ -70,10 +59,8 @@ export class LiveRecorder {
   private source: VideoSampleSource
   private canvas: HTMLCanvasElement
   private fps: number
-  private nextTick = 0
-  private dropped = 0
-  /** The sample captured last, waiting for the next one to set how long it lasts. */
-  private held: { frame: VideoFrame; tick: number } | null = null
+  /** Ticks captured so far: the next sample's tick. */
+  ticks = 0
   private queue = 0
   private chain: Promise<void> = Promise.resolve()
   private failed: unknown = null
@@ -126,28 +113,27 @@ export class LiveRecorder {
     return new LiveRecorder(canvas, fps, output, source, chosen.format, chosen.format !== format)
   }
 
-  /** Called right after the canvas drew a frame, `elapsedMs` into the take. */
-  frame(elapsedMs: number): void {
-    if (this.failed) return
-    const plan = nextSample(elapsedMs, this.nextTick, this.fps)
-    if (!plan) return
-    if (this.queue >= MAX_QUEUE) return
-    this.dropped += plan.tick - this.nextTick
-    const frame = new VideoFrame(this.canvas, { timestamp: Math.round((plan.tick / this.fps) * 1e6) })
-    this.release(plan.tick)
-    this.held = { frame, tick: plan.tick }
-    this.nextTick = plan.after
+  /** True while the encoder has as much waiting as it takes: draw no further tick until it catches up. */
+  get busy(): boolean {
+    return this.queue >= MAX_QUEUE || this.failed !== null
   }
 
-  /** Sends the held sample, lasting until `untilTick`. */
-  private release(untilTick: number): void {
-    const held = this.held
-    if (!held) return
-    this.held = null
-    const sample = new VideoSample(held.frame, {
-      timestamp: held.tick / this.fps,
-      duration: Math.max(1, untilTick - held.tick) / this.fps,
-    })
+  /** Called right after the canvas drew tick `ticks`: that frame becomes the next sample, one tick long. */
+  capture(): void {
+    if (this.failed) return
+    const tick = this.ticks
+    let frame: VideoFrame | null = null
+    let sample: VideoSample
+    try {
+      frame = new VideoFrame(this.canvas, { timestamp: Math.round((tick / this.fps) * 1e6) })
+      sample = new VideoSample(frame, { timestamp: tick / this.fps, duration: 1 / this.fps })
+    } catch (error) {
+      // The take fails as a whole (busy turns true, stop() reports it); the frame loop keeps running.
+      frame?.close()
+      this.failed = error
+      return
+    }
+    this.ticks++
     this.queue++
     this.chain = this.chain
       .then(() => this.source.add(sample))
@@ -156,21 +142,15 @@ export class LiveRecorder {
       })
       .finally(() => {
         sample.close()
-        held.frame.close()
+        frame.close()
         this.queue--
       })
   }
 
-  /** Ends the take at `elapsedMs` and returns the file. */
-  async stop(elapsedMs: number): Promise<RecordResult> {
-    const end = Math.max(1, Math.round((elapsedMs * this.fps) / 1000))
-    // A sample taken on the stop's own tick would run past the end: the one before it already lasts until then.
-    if (this.held && this.held.tick >= end && this.held.tick > 0) {
-      this.held.frame.close()
-      this.held = null
-    }
-    if (this.held) this.release(Math.max(end, this.held.tick + 1))
+  /** Ends the take after the ticks captured so far and returns the file. */
+  async stop(): Promise<RecordResult> {
     await this.chain
+    if (!this.failed && this.ticks === 0) this.failed = new Error('Nothing was recorded.')
     if (this.failed) {
       await this.output.cancel().catch(() => {})
       throw this.failed instanceof Error ? this.failed : new Error(String(this.failed))
@@ -183,14 +163,12 @@ export class LiveRecorder {
       blob: new Blob([buffer], { type: VIDEO_MIMES[this.format] }),
       format: this.format,
       fellBack: this.fellBack,
-      durationMs: (end / this.fps) * 1000,
-      dropped: this.dropped,
+      durationMs: (this.ticks / this.fps) * 1000,
+      frames: this.ticks,
     }
   }
 
   async cancel(): Promise<void> {
-    this.held?.frame.close()
-    this.held = null
     await this.chain
     await this.output.cancel().catch(() => {})
   }

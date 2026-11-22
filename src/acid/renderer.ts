@@ -7,6 +7,11 @@
 //    glow inside the letters, the halo spilling out of them and the wash (a colour field straight from the colour
 //    mask, with an edge that is hard in places, soft in others and dissolves in a few), over the background or
 //    transparent.
+// Contour bleed (optional): the coverage blurred at a quarter of the size gives each pixel how deep in or how far out of
+//    a letter it is; the gradient runs along that, from the outline in (the middle keeps its ink) and out (fading).
+// Exposure flash (optional): the lit letters pushed brighter towards the light's colour, and the glow blurred wider
+//    into a bloom, both by the flash's envelope.
+// The output is dithered by a hair so the soft gradients do not band.
 
 import type { GradientStop } from '../state/settings'
 import { hexToRgb, slantDirection, type Rgb } from './gradient'
@@ -30,6 +35,17 @@ export interface FrameLook {
   fillRule: 'nonzero' | 'evenodd'
   /** Seconds since start, for the flowing colour. */
   time: number
+  /** Font size, a share of the canvas height (contour bleed widths follow it). */
+  fontSize: number
+  contour: boolean
+  contourWidth: number
+  contourStrength: number
+  contourSoft: number
+  /** Exposure flash envelope now: 0 none, 1 the instant a flash fires. */
+  flash: number
+  flashExposure: number
+  flashBloom: number
+  flashColor: string
 }
 
 const MAX_STOPS = 8
@@ -69,6 +85,13 @@ void main() {
   o = vec4(cov * c, 0.0, 0.0, 1.0);
 }`
 
+const COPY_FS = `#version 300 es
+precision highp float;
+in vec2 vUv;
+uniform sampler2D uSrc;
+out vec4 o;
+void main() { o = vec4(texture(uSrc, vUv).r, 0.0, 0.0, 1.0); }`
+
 const BLUR_FS = `#version 300 es
 precision highp float;
 in vec2 vUv;
@@ -91,6 +114,9 @@ in vec2 vUv;
 uniform sampler2D uCov;
 uniform sampler2D uMask;
 uniform sampler2D uGlow;
+uniform sampler2D uEdge;
+uniform sampler2D uEdgeWide;
+uniform sampler2D uBloom;
 uniform vec2 uMaskScale;
 uniform vec3 uInk;
 uniform vec3 uBg;
@@ -109,6 +135,10 @@ uniform float uWash;
 uniform float uWashBody;
 uniform float uWashEdge;
 uniform float uWashDissolve;
+uniform float uContour;
+uniform float uFlash;
+uniform float uBloomAmt;
+uniform vec3 uFlashCol;
 out vec4 o;
 
 float hash(vec2 p) {
@@ -149,6 +179,11 @@ vec3 saturateColor(vec3 c, float amount) {
   float l = dot(c, vec3(0.2126, 0.7152, 0.0722));
   return clamp(mix(vec3(l), c, 1.0 + amount), 0.0, 1.0);
 }
+// A camera exposure: brighter by f stops' worth, and towards the light's colour as it blows out. f = 0 leaves x.
+vec3 expose(vec3 x, float f) {
+  vec3 y = x * exp2(f * 2.2) + uFlashCol * f * 0.25;
+  return mix(clamp(y, 0.0, 1.0), uFlashCol, smoothstep(0.35, 1.0, f) * 0.92);
+}
 
 void main() {
   vec2 p = vec2(vUv.x, 1.0 - vUv.y);
@@ -163,7 +198,7 @@ void main() {
   vec2 w = q * 2.4;
   float n1 = fbm(w + vec2(uTime * 0.31, -uTime * 0.23));
   float n2 = fbm(w * 1.6 + vec2(-uTime * 0.17, uTime * 0.29) + n1 * 1.7);
-  s += uNoise * (n2 - 0.5) * 1.1 + uTime * 0.07;
+  s += uNoise * (n2 - 0.5) * 1.1 + uTime * 0.07 + uFlash * 0.12;
   float m = mod(s, 2.0);
   s = m > 1.0 ? 2.0 - m : m;
   vec3 col = gradientAt(s);
@@ -190,18 +225,51 @@ void main() {
   // Inside the letters: ink where the brush has not been, glowing acid colour where it has. Over the wash, part of the
   // ink stays so the letters show in the colour.
   vec3 lit = col * (1.0 + 0.3 * uGlowAmt * c);
-  vec3 letter = mix(uInk, lit, c * (1.0 - 0.45 * wash)) + col * glow * uGlowAmt * 0.45;
+  float litAmt = c * (1.0 - 0.45 * wash);
   // Outside them: the halo the lit letters throw (none at Spill 0), and the wash.
   float halo = clamp(glow * uGlowAmt * uSpill * 1.6, 0.0, 1.0);
   vec3 haloCol = saturateColor(col * 1.15, 0.3);
+  // Contour bleed: blurred coverage, 1 deep inside a letter, about 0.5 on its outline, 0 well clear of it; narrow
+  // (Bleed width) for how far the gradient runs in, wide (Edge softness) for how far it fades out. Inside, the first
+  // half of the stops runs from the ink in the middle to the outline; outside, the second half runs on out.
+  float rim = 0.0;
+  vec3 rimCol = col;
+  if (uContour > 0.0) {
+    float drift = uNoise * (n2 - 0.5) * 0.18 + 0.04 * sin(uTime * 1.7 + n1 * 6.2832);
+    float din = clamp(2.0 * (1.0 - texture(uEdge, vUv).r), 0.0, 1.0);
+    float ew = clamp(2.0 * texture(uEdgeWide, vUv).r, 0.0, 1.0);
+    float pos = cov > 0.5 ? 0.5 * din : 0.5 + 0.5 * smoothstep(0.0, 0.6, 1.0 - ew);
+    vec3 ring = saturateColor(gradientAt(clamp(pos + drift, 0.0, 1.0)), 0.25);
+    // Ink deep in, full gradient at the outline.
+    float inner = smoothstep(0.0, 1.0, din);
+    lit = ring * (1.0 + 0.25 * uGlowAmt * c);
+    litAmt = c * uContour * inner * (1.0 - 0.45 * wash);
+    rim = c * uContour * pow(ew, 1.3);
+    rimCol = ring;
+  }
+  vec3 letter = mix(uInk, lit, litAmt) + col * glow * uGlowAmt * 0.45;
+  // Exposure flash: the lit letters blow out towards the light, and the light blooms past them.
+  float bloom = 0.0;
+  if (uFlash > 0.0) {
+    letter = mix(letter, expose(letter, uFlash), clamp(c * 1.5, 0.0, 1.0));
+    bloom = clamp(texture(uBloom, vUv).r * uBloomAmt, 0.0, 1.0);
+    letter = mix(letter, uFlashCol, bloom * 0.35);
+  }
 
+  // A hair of noise (under one 8-bit step) so the soft gradients do not band.
+  float dither = (hash(gl_FragCoord.xy + fract(uTime * 7.31) * 113.0) - 0.5) / 255.0;
   if (uTransparent > 0.5) {
-    float out_a = 1.0 - (1.0 - halo) * (1.0 - wash);
-    vec3 out_c = haloCol * halo * (1.0 - wash) + washCol * wash;
-    o = vec4(clamp(letter, 0.0, 1.0) * cov + out_c * (1.0 - cov), cov + (1.0 - cov) * out_a);
+    // Layers over nothing, premultiplied: halo, contour rim, wash, bloom.
+    vec4 acc = vec4(haloCol * halo, halo);
+    acc = vec4(rimCol * rim, rim) + acc * (1.0 - rim);
+    acc = vec4(washCol * wash, wash) + acc * (1.0 - wash);
+    acc = vec4(uFlashCol * bloom, bloom) + acc * (1.0 - bloom);
+    o = vec4(clamp(letter, 0.0, 1.0) * cov + acc.rgb * (1.0 - cov), cov + (1.0 - cov) * acc.a);
+    o.rgb = clamp(o.rgb + dither * o.a, 0.0, 1.0);
   } else {
-    vec3 bg = mix(mix(uBg, haloCol, halo), washCol, wash);
-    o = vec4(mix(bg, clamp(letter, 0.0, 1.0), cov), 1.0);
+    vec3 bg = mix(mix(mix(uBg, haloCol, halo), rimCol, rim), washCol, wash);
+    bg = mix(bg, uFlashCol, bloom);
+    o = vec4(clamp(mix(bg, clamp(letter, 0.0, 1.0), cov) + dither, 0.0, 1.0), 1.0);
   }
 }`
 
@@ -248,6 +316,7 @@ export class AcidRenderer {
   private glowSrc: Program
   private blur: Program
   private composite: Program
+  private copy: Program
   private vao: WebGLVertexArrayObject
   private quadVao: WebGLVertexArrayObject
   private vbo: WebGLBuffer
@@ -261,6 +330,13 @@ export class AcidRenderer {
   private coverage: Target | null = null
   private glowA: Target | null = null
   private glowB: Target | null = null
+  private edgeA: Target | null = null
+  private edgeB: Target | null = null
+  private edgeW: Target | null = null
+  private bloomA: Target | null = null
+  private bloomB: Target | null = null
+  /** Blur targets in half floats when the browser can draw into them (smoother falloffs), else 8 bits. */
+  private blurFormat: number
   private width = 0
   private height = 0
   private samples: number
@@ -282,6 +358,8 @@ export class AcidRenderer {
     this.cover = program(gl, QUAD_VS, FLAT_FS, [])
     this.glowSrc = program(gl, QUAD_VS, GLOW_SRC_FS, ['uCov', 'uMask', 'uMaskScale'])
     this.blur = program(gl, QUAD_VS, BLUR_FS, ['uSrc', 'uStep'])
+    this.copy = program(gl, QUAD_VS, COPY_FS, ['uSrc'])
+    this.blurFormat = gl.getExtension('EXT_color_buffer_float') ? gl.RGBA16F : gl.RGBA8
     this.composite = program(gl, QUAD_VS, COMPOSITE_FS, [
       'uCov',
       'uMask',
@@ -304,6 +382,13 @@ export class AcidRenderer {
       'uWashBody',
       'uWashEdge',
       'uWashDissolve',
+      'uEdge',
+      'uEdgeWide',
+      'uBloom',
+      'uContour',
+      'uFlash',
+      'uBloomAmt',
+      'uFlashCol',
     ])
     this.vao = gl.createVertexArray()!
     this.vbo = gl.createBuffer()!
@@ -321,7 +406,7 @@ export class AcidRenderer {
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
   }
 
-  private target(w: number, h: number, old: Target | null): Target {
+  private target(w: number, h: number, old: Target | null, format: number = this.gl.RGBA8): Target {
     const gl = this.gl
     if (old) {
       gl.deleteFramebuffer(old.fb)
@@ -329,7 +414,7 @@ export class AcidRenderer {
     }
     const tex = gl.createTexture()!
     gl.bindTexture(gl.TEXTURE_2D, tex)
-    gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA8, w, h)
+    gl.texStorage2D(gl.TEXTURE_2D, 1, format, w, h)
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
@@ -374,8 +459,14 @@ export class AcidRenderer {
     this.coverage = this.target(width, height, this.coverage)
     const gw = Math.max(1, Math.round(width / GLOW_DIVISOR))
     const gh = Math.max(1, Math.round(height / GLOW_DIVISOR))
-    this.glowA = this.target(gw, gh, this.glowA)
-    this.glowB = this.target(gw, gh, this.glowB)
+    const f = this.blurFormat
+    this.glowA = this.target(gw, gh, this.glowA, f)
+    this.glowB = this.target(gw, gh, this.glowB, f)
+    this.edgeA = this.target(gw, gh, this.edgeA, f)
+    this.edgeB = this.target(gw, gh, this.edgeB, f)
+    this.edgeW = this.target(gw, gh, this.edgeW, f)
+    this.bloomA = this.target(gw, gh, this.bloomA, f)
+    this.bloomB = this.target(gw, gh, this.bloomB, f)
     gl.bindFramebuffer(gl.FRAMEBUFFER, null)
   }
 
@@ -418,12 +509,28 @@ export class AcidRenderer {
     gl.uniform1i(loc, unit)
   }
 
+  /** Blurs `a` in place (through `b`): separable Gaussian rounds, `radius` pixels of `a` wide. */
+  private blurInPlace(a: Target, b: Target, radius: number, rounds: readonly number[]): void {
+    const gl = this.gl
+    for (const k of rounds) {
+      const spread = radius * k
+      gl.useProgram(this.blur.program)
+      this.bind(0, a.tex, this.blur.u.uSrc)
+      gl.uniform2f(this.blur.u.uStep, spread / a.w, 0)
+      this.quad(this.blur, b)
+      this.bind(0, b.tex, this.blur.u.uSrc)
+      gl.uniform2f(this.blur.u.uStep, 0, spread / a.h)
+      this.quad(this.blur, a)
+    }
+  }
+
   render(look: FrameLook): void {
     const gl = this.gl
     const cov = this.coverage
     const glowA = this.glowA
     const glowB = this.glowB
-    if (!cov || !glowA || !glowB || !this.msFb) return
+    const { edgeA, edgeB, edgeW, bloomA, bloomB } = this
+    if (!cov || !glowA || !glowB || !edgeA || !edgeB || !edgeW || !bloomA || !bloomB || !this.msFb) return
     const { width, height } = this
 
     // 1. Fill into the stencil, then cover where it is set.
@@ -467,14 +574,28 @@ export class AcidRenderer {
     gl.uniform2f(this.glowSrc.u.uMaskScale, this.maskScale[0], this.maskScale[1])
     this.quad(this.glowSrc, glowA)
     const radius = 1 + look.bleed * 0.09 * glowA.h
-    for (const spread of [radius / 4, radius / 9]) {
-      gl.useProgram(this.blur.program)
-      this.bind(0, glowA.tex, this.blur.u.uSrc)
-      gl.uniform2f(this.blur.u.uStep, spread / glowA.w, 0)
-      this.quad(this.blur, glowB)
-      this.bind(0, glowB.tex, this.blur.u.uSrc)
-      gl.uniform2f(this.blur.u.uStep, 0, spread / glowA.h)
-      this.quad(this.blur, glowA)
+    this.blurInPlace(glowA, glowB, radius, [1 / 4, 1 / 9])
+
+    // Contour bleed: the coverage alone, blurred by the width (a share of the font size).
+    if (look.contour) {
+      gl.useProgram(this.copy.program)
+      this.bind(0, cov.tex, this.copy.u.uSrc)
+      this.quad(this.copy, edgeA)
+      const size = look.fontSize * edgeA.h
+      this.blurInPlace(edgeA, edgeB, 0.5 + (0.015 + 0.16 * look.contourWidth) * size, [1 / 4, 1 / 7, 1 / 11])
+      // The wide one goes on from the narrow one (blurs add up).
+      gl.useProgram(this.copy.program)
+      this.bind(0, edgeA.tex, this.copy.u.uSrc)
+      this.quad(this.copy, edgeW)
+      this.blurInPlace(edgeW, edgeB, 1 + (0.04 + 0.3 * look.contourSoft) * size, [1 / 4, 1 / 7, 1 / 11])
+    }
+    // Exposure flash: the glow blurred further into a bloom, wider with Bloom.
+    const flashing = look.flash > 1e-3 && look.flashExposure > 0
+    if (flashing && look.flashBloom > 0) {
+      gl.useProgram(this.copy.program)
+      this.bind(0, glowA.tex, this.copy.u.uSrc)
+      this.quad(this.copy, bloomA)
+      this.blurInPlace(bloomA, bloomB, 1 + (0.03 + 0.12 * look.flashBloom) * bloomA.h, [1 / 4, 1 / 8])
     }
 
     // 3. Composite to the canvas.
@@ -483,6 +604,14 @@ export class AcidRenderer {
     this.bind(0, cov.tex, c.u.uCov)
     this.bind(1, this.maskTex, c.u.uMask)
     this.bind(2, glowA.tex, c.u.uGlow)
+    this.bind(3, edgeA.tex, c.u.uEdge)
+    this.bind(4, bloomA.tex, c.u.uBloom)
+    this.bind(5, edgeW.tex, c.u.uEdgeWide)
+    gl.uniform1f(c.u.uContour, look.contour ? look.contourStrength : 0)
+    const flash = flashing ? look.flash * look.flashExposure : 0
+    gl.uniform1f(c.u.uFlash, flash)
+    gl.uniform1f(c.u.uBloomAmt, flashing ? look.flash * look.flashBloom * 2.2 : 0)
+    gl.uniform3fv(c.u.uFlashCol, [...hexToRgb(look.flashColor)])
     gl.uniform2f(c.u.uMaskScale, this.maskScale[0], this.maskScale[1])
     gl.uniform3fv(c.u.uInk, [...hexToRgb(look.ink)])
     gl.uniform3fv(c.u.uBg, [...hexToRgb(look.background)])
@@ -517,7 +646,16 @@ export class AcidRenderer {
   /** Frees the buffers; the context stays, since a canvas gives the same one to the next renderer. */
   dispose(): void {
     const gl = this.gl
-    for (const t of [this.coverage, this.glowA, this.glowB]) {
+    for (const t of [
+      this.coverage,
+      this.glowA,
+      this.glowB,
+      this.edgeA,
+      this.edgeB,
+      this.edgeW,
+      this.bloomA,
+      this.bloomB,
+    ]) {
       if (!t) continue
       gl.deleteFramebuffer(t.fb)
       gl.deleteTexture(t.tex)
@@ -527,6 +665,7 @@ export class AcidRenderer {
     if (this.msStencil) gl.deleteRenderbuffer(this.msStencil)
     gl.deleteTexture(this.maskTex)
     gl.deleteBuffer(this.vbo)
-    for (const p of [this.fill, this.cover, this.glowSrc, this.blur, this.composite]) gl.deleteProgram(p.program)
+    for (const p of [this.fill, this.cover, this.glowSrc, this.blur, this.composite, this.copy])
+      gl.deleteProgram(p.program)
   }
 }

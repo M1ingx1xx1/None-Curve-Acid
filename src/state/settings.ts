@@ -12,6 +12,10 @@ export type LetterCase = 'none' | 'upper' | 'lower'
 export type BrushMode = 'hold' | 'decay' | 'follow' | 'auto'
 export type FillRule = 'nonzero' | 'evenodd'
 export type AspectName = '4:5' | '1:1' | '9:16' | '16:9' | 'custom'
+/** Strobe: 'shape' jumps the letters between shapes; 'flash' lights them like a camera flash, shapes kept. */
+export type StrobeMode = 'shape' | 'flash'
+export const FPS_CHOICES = [30, 60, 90] as const
+export type Fps = (typeof FPS_CHOICES)[number]
 
 export interface GradientStop {
   color: string
@@ -88,6 +92,23 @@ export interface Settings {
   strobeAmount: number
   /** ms each strobe shape stays. */
   strobeHoldMs: number
+  strobeMode: StrobeMode
+  /** Exposure flash: how far a flash brightens (0–1; near 1 the letters briefly go white). */
+  flashExposure: number
+  /** Exposure flash: how strong and wide the light spills past the letters. */
+  flashBloom: number
+  /** Exposure flash: flashes a second. */
+  flashRate: number
+  /** Exposure flash: the light's colour. */
+  flashColor: string
+  /** Glitch: the in-between shapes torn, shifted and stretched, held longer, with a trail after the brush. */
+  glitch: boolean
+  /** 0–1: how far the in-between shapes stretch, shift and tear. */
+  glitchAmount: number
+  /** 0–1: how long the shapes and colour linger after the brush has passed (0 none, 1 about 2.5 s). */
+  glitchTrail: number
+  /** With two target fonts: the chance a letter takes B1 (the rest take B2). */
+  b1Share: number
   // Acid
   stops: GradientStop[]
   slant: number
@@ -102,8 +123,16 @@ export interface Settings {
   washDissolve: number
   /** 0–1: how far the colour spreads past the brush, joining nearby strokes. */
   spread: number
+  /** Contour bleed: the letter keeps its ink in the middle, the gradient runs in from its outline and out past it. */
+  contour: boolean
+  /** 0–1: how far the gradient reaches in from the outline (more: less solid ink). */
+  contourWidth: number
+  /** 0–1: how strongly the gradient covers the ink. */
+  contourStrength: number
+  /** 0–1: how soft and wide the colour fades out past the outline. */
+  contourSoft: number
   // Export
-  fps: 30 | 60
+  fps: Fps
 }
 
 export const DEFAULT_TEXT = 'ACID WASH\nnone curve\ntype 2026'
@@ -185,6 +214,15 @@ export const DEFAULT_SETTINGS: Settings = {
   strobe: false,
   strobeAmount: 0.5,
   strobeHoldMs: 80,
+  strobeMode: 'shape',
+  flashExposure: 0.7,
+  flashBloom: 0.5,
+  flashRate: 4,
+  flashColor: '#ffffff',
+  glitch: false,
+  glitchAmount: 0.5,
+  glitchTrail: 0.5,
+  b1Share: 0.5,
   stops: PRESETS[0].stops,
   slant: 45,
   flow: 0.35,
@@ -196,6 +234,10 @@ export const DEFAULT_SETTINGS: Settings = {
   washEdge: 0.5,
   washDissolve: 0.2,
   spread: 0,
+  contour: false,
+  contourWidth: 0.3,
+  contourStrength: 0.85,
+  contourSoft: 0.5,
   fps: 60,
 }
 
@@ -229,6 +271,15 @@ export const RANGES: Record<Exclude<NumberKey, 'fps'>, readonly [number, number,
   anchorDensity: [0, 1, 0.05],
   strobeAmount: [0, 1, 0.01],
   strobeHoldMs: [16, 1000, 1],
+  flashExposure: [0, 1, 0.01],
+  flashBloom: [0, 1, 0.01],
+  flashRate: [0.5, 15, 0.1],
+  glitchAmount: [0, 1, 0.01],
+  glitchTrail: [0, 1, 0.01],
+  b1Share: [0, 1, 0.01],
+  contourWidth: [0, 1, 0.01],
+  contourStrength: [0, 1, 0.01],
+  contourSoft: [0, 1, 0.01],
   wash: [0, 1, 0.01],
   washBody: [0, 1, 0.01],
   washEdge: [0, 1, 0.01],
@@ -251,6 +302,7 @@ export const CHOICES = {
   aspect: ['4:5', '1:1', '9:16', '16:9', 'custom'],
   fadeEase: EASE_NAMES,
   morphEase: EASE_NAMES,
+  strobeMode: ['shape', 'flash'],
 } as const satisfies Partial<Record<keyof Settings, readonly string[]>>
 
 export const OUTPUT_HEIGHTS = [720, 1080, 1350, 1920, 2160, 2880, 3840] as const
@@ -292,12 +344,12 @@ export function sanitize(input: unknown): Settings {
       if (typeof value === 'number' && Number.isFinite(value)) target[key] = Math.min(max, Math.max(min, value))
     } else if (key in CHOICES) {
       if ((CHOICES[key as keyof typeof CHOICES] as readonly string[]).includes(value as string)) target[key] = value
-    } else if (key === 'ink' || key === 'background') {
+    } else if (key === 'ink' || key === 'background' || key === 'flashColor') {
       target[key] = normalizeHex(value) ?? out[key]
     } else if (key === 'stops') {
       out.stops = sanitizeStops(value) ?? out.stops
     } else if (key === 'fps') {
-      if (value === 30 || value === 60) out.fps = value
+      if ((FPS_CHOICES as readonly unknown[]).includes(value)) out.fps = value as Fps
     } else if (key === 'text') {
       if (typeof value === 'string') out.text = value.slice(0, TEXT_LIMIT)
     } else if (typeof value === typeof DEFAULT_SETTINGS[key]) {
