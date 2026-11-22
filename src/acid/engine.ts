@@ -5,10 +5,11 @@
 import type { LoadedFont } from '../font/parse'
 import { applyCase, canvasSize, type Settings } from '../state/settings'
 import { morphAmount, type MorphShaping } from './brush'
+import { glitchHold, glitchOffset, trailStep, type GlitchParams } from './glitch'
 import { intersects, MaskField, type StampParams } from './mask'
 import { Spring2, sweepPath, type Point2 } from './motion'
 import { AcidRenderer } from './renderer'
-import { layoutScene, morphGlyph, type PlacedGlyph } from './scene'
+import { layoutScene, morphGlyph, setTarget, type Displace, type PlacedGlyph } from './scene'
 import { Spread } from './spread'
 
 /** Without pointer moves for this long (ms), the auto brush takes over again. */
@@ -31,6 +32,30 @@ export function strobeT(t: number, amount: number, glyph: number, period: number
   if (!(t > 1e-4)) return t
   const r = hash01(glyph, period) * 2 - 1
   return Math.min(1, Math.max(0, r > 0 ? t + r * amount * (1 - t) : t + r * amount * t))
+}
+
+/** Glitch trail at 1: how long (ms) what the brush left takes to fall to about a third. */
+export const TRAIL_MAX_MS = 2500
+
+/**
+ * The exposure flash's brightness `ms` into the take at `rate` flashes a second: 1 the instant a flash fires, falling
+ * fast (exponentially) until the next one. 0 when the rate is not positive.
+ */
+export function flashEnvelope(ms: number, rate: number): number {
+  if (!(rate > 0) || !(ms >= 0)) return 0
+  const phase = ((ms * rate) / 1000) % 1
+  return Math.exp(-phase * 6.5)
+}
+
+/** A pointer sample: where it was at `at` (ms), and whether it was on the canvas and pressed. */
+interface PointerSample {
+  at: number
+  /** When the pointer last moved, as of `at`. */
+  movedAt?: number
+  x: number
+  y: number
+  inside: boolean
+  pressed: boolean
 }
 
 /** The mask cell size (canvas pixels) for a canvas `height` pixels tall: about 320 rows. */
@@ -63,6 +88,17 @@ export class AcidEngine {
   private spreadC: Spread | null = null
   private spreadKey = ''
   private strobePeriod = -1
+  /** Glitch trail: the fields after Spread, following them up at once and falling back slowly. */
+  private trailM: Float32Array | null = null
+  private trailC: Float32Array | null = null
+  private trailLive = false
+  /** Recent pointer samples, for the fixed clock of a recording (frames between two samples interpolate). */
+  private history: PointerSample[] = []
+  /**
+   * True while recording: frames come on the video's own clock (possibly several per screen refresh) and the brush is
+   * where the pointer was at each frame's time, not where it is now.
+   */
+  fixedClock = false
   /** Average frame time (ms). */
   frameMs = 16.7
   /** Glyphs morphed on the last frame. */
@@ -86,22 +122,59 @@ export class AcidEngine {
     this.pointer.inside = true
     this.pointer.pressed = pressed
     this.pointer.movedAt = now
+    this.remember(now)
   }
 
-  pointerLeave(): void {
+  pointerLeave(now = performance.now()): void {
     this.pointer.inside = false
     this.pointer.pressed = false
+    this.remember(now)
+  }
+
+  private remember(now: number): void {
+    const h = this.history
+    const p = this.pointer
+    // Events can come out of order by a hair; keep the list sorted by time.
+    while (h.length && h[h.length - 1].at > now) h.pop()
+    h.push({ at: now, x: p.x, y: p.y, inside: p.inside, pressed: p.pressed })
+    if (h.length > 512) h.splice(0, h.length - 512)
+  }
+
+  /** Where the pointer was at `now` (between two samples: on the line between them). */
+  private pointerAt(now: number): PointerSample {
+    const h = this.history
+    const p = this.pointer
+    if (!this.fixedClock || !h.length || now >= h[h.length - 1].at)
+      return { at: now, x: p.x, y: p.y, inside: p.inside, pressed: p.pressed, movedAt: p.movedAt }
+    let i = h.length - 1
+    while (i > 0 && h[i - 1].at > now) i--
+    const b = h[i]
+    const a = i > 0 ? h[i - 1] : null
+    if (!a) return { ...b, inside: false, pressed: false, movedAt: -Infinity }
+    const k = (now - a.at) / Math.max(1e-6, b.at - a.at)
+    const both = a.inside && b.inside
+    return {
+      at: now,
+      x: both ? a.x + (b.x - a.x) * k : a.x,
+      y: both ? a.y + (b.y - a.y) * k : a.y,
+      inside: a.inside,
+      pressed: a.pressed,
+      movedAt: a.at,
+    }
   }
 
   clear(): void {
     this.mask?.clear()
     this.brushPrev = null
+    this.trailM?.fill(0)
+    this.trailC?.fill(0)
   }
 
   /** Advances to `now` (ms) and draws. */
-  frame(now: number, s: Settings, fontA: LoadedFont | null, fontB: LoadedFont | null): void {
+  frame(now: number, s: Settings, fontA: LoadedFont | null, fontB: LoadedFont | readonly LoadedFont[] | null): void {
+    const targets = !fontB ? [] : Array.isArray(fontB) ? (fontB as readonly LoadedFont[]) : [fontB as LoadedFont]
     if (!this.start) this.start = now
-    const dt = this.last ? Math.min(100, now - this.last) : 16.7
+    const dt = this.last ? Math.min(100, Math.max(0, now - this.last)) : 16.7
     this.last = now
     this.frameMs += (dt - this.frameMs) * 0.05
 
@@ -111,6 +184,9 @@ export class AcidEngine {
       this.height = height
       const cell = maskCell(height)
       this.mask = new MaskField(width, height, cell)
+      // A new canvas starts with no trail, even when the mask keeps its cell count.
+      this.trailM = this.trailC = null
+      this.trailLive = false
       this.renderer.resize(width, height, this.mask.cols, this.mask.rows, cell)
       this.layoutKey = ''
       this.maskVersion = -1
@@ -119,11 +195,11 @@ export class AcidEngine {
     const mask = this.mask
 
     let layoutChanged = false
-    if (fontA && fontB) {
+    if (fontA && targets.length) {
       const text = applyCase(s.text, s.letterCase)
       const key = JSON.stringify([
         fontA.id,
-        fontB.id,
+        targets.map((f) => f.id),
         text,
         s.align,
         s.fontSize,
@@ -135,7 +211,7 @@ export class AcidEngine {
       ])
       if (key !== this.layoutKey) {
         this.layoutKey = key
-        this.glyphs = layoutScene(fontA, fontB, { ...s, text }, width, height)
+        this.glyphs = layoutScene(fontA, targets, { ...s, text }, width, height)
         layoutChanged = true
       }
     } else if (this.glyphs.length) {
@@ -150,7 +226,8 @@ export class AcidEngine {
     mask.step(dt, s.mode === 'hold' ? 'hold' : 'fade', s.decayMs, s.fadeEase)
 
     const shaping: MorphShaping = { band: s.band, maxMorph: s.maxMorph, morphEase: s.morphEase }
-    const shapingKey = JSON.stringify([shaping, s.perGlyph, s.strobe, s.strobeAmount])
+    const shapeStrobe = s.strobe && s.strobeMode === 'shape'
+    const shapingKey = JSON.stringify([shaping, s.perGlyph, shapeStrobe, s.strobeAmount, s.glitch, s.glitchAmount])
     if (shapingKey !== this.shapingKey) {
       this.shapingKey = shapingKey
       for (const g of this.glyphs) g.stale = true
@@ -170,37 +247,88 @@ export class AcidEngine {
       this.fieldM = this.spreadM && this.spreadChannel(this.spreadM, mask, mask.morph, s.morphSpread, s.radius)
       this.fieldC = this.spreadC && this.spreadChannel(this.spreadC, mask, mask.color, s.spread, s.radius)
     }
-    const fieldM = this.fieldM ?? mask.morph
-    const fieldC = this.fieldC ?? mask.color
+    let fieldM = this.fieldM ?? mask.morph
+    let fieldC = this.fieldC ?? mask.color
+    // Glitch trail: what the brush left lingers and falls back slowly.
+    const trailMs = s.glitch ? s.glitchTrail * TRAIL_MAX_MS : 0
+    let trailMoved = false
+    if (trailMs > 0) {
+      const n = mask.cols * mask.rows
+      const fresh = this.trailM?.length !== n
+      if (fresh) {
+        this.trailM = new Float32Array(n)
+        this.trailC = new Float32Array(n)
+      }
+      if (fresh || maskChanged || this.trailLive) {
+        const liveM = trailStep(this.trailM!, fieldM, dt, trailMs)
+        const liveC = trailStep(this.trailC!, fieldC, dt, trailMs)
+        trailMoved = true
+        this.trailLive = liveM || liveC
+      }
+      fieldM = this.trailM!
+      fieldC = this.trailC!
+    } else if (this.trailLive || this.trailM) {
+      // Turned off: drop the trail and show the plain fields again.
+      this.trailM = this.trailC = null
+      this.trailLive = false
+      trailMoved = true
+      for (const g of this.glyphs) g.stale = true
+    }
     if (dirty && s.morphSpread > 0) {
       const pad = s.morphSpread * SPREAD_RADII * s.radius * height
       dirty = { x0: dirty.x0 - pad, y0: dirty.y0 - pad, x1: dirty.x1 + pad, y1: dirty.y1 + pad }
     }
 
-    // Strobe: each hold period every letter under the brush jumps to its own shape.
-    const period = s.strobe ? Math.floor((now - this.start) / Math.max(16, s.strobeHoldMs)) : -1
+    // Strobe: each hold period every letter under the brush jumps to its own shape (shape mode only).
+    const period = shapeStrobe ? Math.floor((now - this.start) / Math.max(16, s.strobeHoldMs)) : -1
     const strobeTick = period !== this.strobePeriod
     this.strobePeriod = period
-    const tBase = (x: number, y: number) => morphAmount(mask.sample(fieldM, x, y), shaping)
+    const field = fieldM
+    const tPlain = (x: number, y: number) => morphAmount(mask.sample(field, x, y), shaping)
+    const tBase = s.glitch ? (x: number, y: number) => glitchHold(tPlain(x, y), s.glitchAmount) : tPlain
+    // Glitch: letters on their way between A and B move every frame (the tears drift), and the trail keeps changing.
+    const glitchTick = s.glitch && s.glitchAmount > 0
+    const glitchTime = (now - this.start) / 1000
     let changed = layoutChanged ? 1 : 0
     this.morphed = 0
     for (let gi = 0; gi < this.glyphs.length; gi++) {
       const g = this.glyphs[gi]
-      if (g.stale || (dirty && intersects(g.box, dirty)) || (strobeTick && g.maxT > 0)) {
+      if (
+        g.stale ||
+        (dirty && intersects(g.box, dirty)) ||
+        (strobeTick && g.maxT > 0) ||
+        ((glitchTick || trailMoved) && g.maxT > 0)
+      ) {
         const before = g.maxT
-        const tAt = s.strobe ? (x: number, y: number) => strobeT(tBase(x, y), s.strobeAmount, gi, period) : tBase
-        morphGlyph(g, tAt, s.perGlyph)
+        // Two target fonts: a letter that is all A again picks B1 or B2 for the next time the brush reaches it, and
+        // keeps it until it is back to A.
+        if (g.pairs && g.pairs.length > 1 && g.maxT <= 0) setTarget(g, Math.random() < s.b1Share ? 0 : 1)
+        const tAt = shapeStrobe ? (x: number, y: number) => strobeT(tBase(x, y), s.strobeAmount, gi, period) : tBase
+        let displace: Displace | undefined
+        if (glitchTick) {
+          const gp: GlitchParams = {
+            amount: s.glitchAmount,
+            time: glitchTime,
+            size: g.size ?? g.box.y1 - g.box.y0,
+            glyph: gi,
+            ox: (g.box.x0 + g.box.x1) / 2,
+            oy: g.y,
+          }
+          displace = (x, y, t) => glitchOffset(x, y, t, gp)
+        }
+        morphGlyph(g, tAt, s.perGlyph, displace)
         // A glyph that was and is still all A needs no new vertices.
         if (before !== 0 || g.maxT !== 0) changed++
         this.morphed++
       }
     }
     if (changed) this.uploadGlyphs()
-    if (maskChanged) {
+    if (maskChanged || trailMoved) {
       this.maskVersion = mask.version
       this.renderer.uploadMask(fieldM, fieldC)
     }
-    this.renderer.render({ ...s, bleed: s.bleed, time: (now - this.start) / 1000 })
+    const flash = s.strobe && s.strobeMode === 'flash' ? flashEnvelope(now - this.start, s.flashRate) : 0
+    this.renderer.render({ ...s, bleed: s.bleed, flash, time: (now - this.start) / 1000 })
   }
 
   /** `spread` when it fits the mask, else a new one. */
@@ -215,9 +343,9 @@ export class AcidEngine {
   }
 
   private moveBrush(now: number, dt: number, s: Settings, mask: MaskField): void {
-    const p = this.pointer
+    const p = this.pointerAt(now)
     // Auto mode sweeps on its own; the pointer takes over while it moves and hands back after AUTO_HANDBACK_MS.
-    const auto = s.mode === 'auto' && now - p.movedAt > AUTO_HANDBACK_MS
+    const auto = s.mode === 'auto' && now - (p.movedAt ?? -Infinity) > AUTO_HANDBACK_MS
     if (auto) this.autoTime += (dt / 1000) * s.autoSpeed
     let at: Point2
     let painting: boolean

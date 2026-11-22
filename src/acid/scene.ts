@@ -1,5 +1,5 @@
 // The text on the canvas: laid out with font A (fontkit's shaping, so kerning applies), each glyph paired with the
-// same character of font B, centred in A's advance at A's em size (never scaled up beyond that). The pairing
+// same character of each target font (B1, and B2 when there is one; a letter morphs towards one of them at a time), centred in A's advance at A's em size (never scaled up beyond that). The pairing
 // (morph/pair.ts) is cached per glyph pair and only redone when the fonts or the text change; each frame only moves
 // anchors (morphGlyph). Pure: no DOM.
 
@@ -29,7 +29,14 @@ export interface GlyphPair {
 }
 
 export interface PlacedGlyph {
+  /** The pair drawn now (pairs[target]). */
   pair: GlyphPair
+  /** One pair per target font (B1, B2); absent means `pair` is the only one. */
+  pairs?: GlyphPair[]
+  /** Which of `pairs` the letter is heading for. */
+  target?: number
+  /** The font size in canvas pixels. */
+  size?: number
   /** Canvas = (x + fx·scale, y − fy·scale). */
   scale: number
   x: number
@@ -58,6 +65,8 @@ const LAYOUT_FEATURES = { liga: false, clig: false, dlig: false, calt: false, rl
 
 const pairCache = new Map<string, GlyphPair>()
 let cacheFonts = ''
+/** Pairs kept at most before the cache starts again (two targets, many sizes). */
+const CACHE_LIMIT = 6000
 
 function boxOf(glyphs: PolygonGlyph[]): { minX: number; minY: number; maxX: number; maxY: number } {
   let minX = Infinity
@@ -113,12 +122,12 @@ export function pairGlyphs(
   tolerance: number,
   density = 0,
 ): GlyphPair {
-  const fonts = `${a.id}:${b.id}`
-  if (fonts !== cacheFonts) {
+  const fonts = `${a.id}`
+  if (fonts !== cacheFonts || pairCache.size > CACHE_LIMIT) {
     pairCache.clear()
     cacheFonts = fonts
   }
-  const key = `${glyphA.id}:${glyphB?.id ?? -1}:${tolerance}:${density}`
+  const key = `${b.id}:${glyphA.id}:${glyphB?.id ?? -1}:${tolerance}:${density}`
   const cached = pairCache.get(key)
   if (cached) return cached
   const maxSide = maxSideShare(density) * a.unitsPerEm
@@ -139,14 +148,15 @@ export function pairGlyphs(
   return pair
 }
 
-/** Lays the text out on a canvas `width` × `height` and pairs every glyph. */
+/** Lays the text out on a canvas `width` × `height` and pairs every glyph with each target font in `b`. */
 export function layoutScene(
   a: FontLike,
-  b: FontLike,
+  b: FontLike | readonly FontLike[],
   params: LayoutParams,
   width: number,
   height: number,
 ): PlacedGlyph[] {
+  const targets = Array.isArray(b) ? (b as readonly FontLike[]) : [b as FontLike]
   const size = params.fontSize * height
   const scale = size / a.unitsPerEm
   const lines = params.text.split(/\r?\n/)
@@ -167,21 +177,27 @@ export function layoutScene(
       const pos = run.positions[i]
       const cp = glyphA.codePoints[0]
       if (glyphA.path.commands.length > 0) {
-        let glyphB: Glyph | null = cp !== undefined ? b.font.glyphForCodePoint(cp) : null
-        if (glyphB && (glyphB.id === 0 || glyphB.path.commands.length === 0)) glyphB = null
-        const pair = pairGlyphs(a, b, glyphA, glyphB, curveTolerance(scale), params.anchorDensity ?? 0)
+        const pairs = targets.map((t) => {
+          let glyphB: Glyph | null = cp !== undefined ? t.font.glyphForCodePoint(cp) : null
+          if (glyphB && (glyphB.id === 0 || glyphB.path.commands.length === 0)) glyphB = null
+          return pairGlyphs(a, t, glyphA, glyphB, curveTolerance(scale), params.anchorDensity ?? 0)
+        })
+        const pair = pairs[0]
         const gx = x + pos.xOffset * scale
         const gy = baseline - pos.yOffset * scale
         out.push({
           pair,
+          pairs,
+          target: 0,
+          size,
           scale,
           x: gx,
           y: gy,
           box: {
-            x0: gx + pair.minX * scale,
-            x1: gx + pair.maxX * scale,
-            y0: gy - pair.maxY * scale,
-            y1: gy - pair.minY * scale,
+            x0: gx + Math.min(...pairs.map((q) => q.minX)) * scale,
+            x1: gx + Math.max(...pairs.map((q) => q.maxX)) * scale,
+            y0: gy - Math.max(...pairs.map((q) => q.maxY)) * scale,
+            y1: gy - Math.min(...pairs.map((q) => q.minY)) * scale,
           },
           shape: pair.tracks.map((t) => new Float32Array(t.sx.length * 2)),
           maxT: -1,
@@ -194,11 +210,29 @@ export function layoutScene(
   return out
 }
 
+/** Points `g` at target `index` of its pairs (a no-op when it already is, or has no such pair). */
+export function setTarget(g: PlacedGlyph, index: number): void {
+  const pairs = g.pairs
+  if (!pairs || !pairs[index] || (g.target ?? 0) === index) return
+  g.target = index
+  g.pair = pairs[index]
+  g.shape = g.pair.tracks.map((t) => new Float32Array(t.sx.length * 2))
+  g.stale = true
+}
+
+/** Moves an anchor at (x, y) with morph amount t by (dx, dy) canvas pixels on top of the morph. */
+export type Displace = (x: number, y: number, t: number) => readonly [number, number]
+
 /**
  * Moves every anchor of `g` to A + t·(B − A), t read at the anchor's A position by `tAt` (canvas pixels); with
- * `wholeGlyph`, one t for the glyph: the mean under its anchors.
+ * `wholeGlyph`, one t for the glyph: the mean under its anchors. `displace` moves anchors further (Glitch).
  */
-export function morphGlyph(g: PlacedGlyph, tAt: (x: number, y: number) => number, wholeGlyph: boolean): void {
+export function morphGlyph(
+  g: PlacedGlyph,
+  tAt: (x: number, y: number) => number,
+  wholeGlyph: boolean,
+  displace?: Displace,
+): void {
   const { scale, x, y } = g
   let whole = 0
   if (wholeGlyph && g.pair.morphs) {
@@ -221,6 +255,11 @@ export function morphGlyph(g: PlacedGlyph, tAt: (x: number, y: number) => number
       if (k > maxT) maxT = k
       out[2 * i] = ax + k * (t.tx[i] - t.sx[i]) * scale
       out[2 * i + 1] = ay - k * (t.ty[i] - t.sy[i]) * scale
+      if (displace && k > 0 && k < 1) {
+        const [dx, dy] = displace(ax, ay, k)
+        out[2 * i] += dx
+        out[2 * i + 1] += dy
+      }
     }
   })
   g.maxT = maxT
